@@ -1,13 +1,14 @@
 const std = @import("std");
 const mem = std.mem;
 
-pub const FragType = enum { literal, variable, for_range, for_each };
+pub const FragType = enum { literal, variable, for_range, for_each, end };
 
 pub const Frag = union(FragType) {
     literal: []const u8,
     variable: []const u8,
     for_range: ForRange,
     for_each: ForEach,
+    end,
     pub const ForRange = struct {
         start: isize,
         end: isize,
@@ -189,7 +190,9 @@ inline fn tokenizeFragments(comptime fmt: []const u8) []const Frag {
                             [1]Frag{@unionInit(Frag, @tagName(state), try parseForRange(escape(variable)))}
                         else
                             [1]Frag{@unionInit(Frag, @tagName(state), try parseForEach(escape(variable)))};
-                    } else
+                    } else if (mem.eql(u8, variable, "end"))
+                        fragments = fragments ++ [1]Frag{@unionInit(Frag, "end", {})}
+                    else
                         fragments = fragments ++ [1]Frag{@unionInit(Frag, @tagName(state), escape(variable))};
                 }
                 parser.mark(2);
@@ -219,7 +222,7 @@ inline fn parseFragments(comptime flat_frags: []const Frag) []const Frag {
             frag_tag.body = parseFragments(flat_frags[i..]);
             i += frag_tag.body.len;
         }
-        if (frag == .variable and mem.eql(u8, frag.variable, "end")) break;
+        if (frag == .end) break;
         result = result ++ &[1]Frag{frag};
     }
     return result;
@@ -231,15 +234,13 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
     var tokens = tokenizeFragments(fmt);
 
     return struct {
-        // Currently fragments is a flat list of fragments
+        // tokens is a flat list of fragments here.
         // need to populate for_range.body and for_each.body with
         // nested fragments.
-        // TODO: This only works for one level of depth.
         pub const fragments = parseFragments(tokens);
 
         pub fn bufPrint(buf: []u8, args: anytype) ![]u8 {
             var fbs = std.io.fixedBufferStream(buf);
-
             try bufPrintImpl(.{}, fragments, fbs.writer(), args);
             return fbs.getWritten();
         }
@@ -288,6 +289,7 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
                                 );
                         }
                     },
+                    .end => unreachable,
                 }
             }
         }
@@ -301,6 +303,7 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
     };
 }
 
+// TODO: use this in place of mem.eql
 fn StrHasher(comptime min_bytes: usize) type {
     return struct {
         const byte_len = std.math.ceilPowerOfTwo(usize, min_bytes) catch |e| @compileError("invalid min_bytes: " ++ @errorName(e));
@@ -356,6 +359,5 @@ test "end" {
     const text = "{{ end   }}";
     const fragments = comptime tokenizeFragments(text);
     std.testing.expectEqual(fragments.len, 1);
-    std.testing.expect(fragments[0] == .variable);
-    std.testing.expectEqualStrings("end", fragments[0].variable);
+    std.testing.expect(fragments[0] == .end);
 }
