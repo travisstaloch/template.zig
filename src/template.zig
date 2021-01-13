@@ -319,6 +319,10 @@ fn StrHasher(comptime min_bytes: usize) type {
     };
 }
 
+test "main tests" {
+    _ = @import("tests.zig");
+}
+
 test "string match" {
     const E = enum {
         a = 1,
@@ -352,7 +356,6 @@ test "end" {
     const text = "{{ end   }}";
     const fragments = comptime tokenizeFragments(text);
     std.testing.expectEqual(fragments.len, 1);
-    // std.debug.print("{}\n", .{tmpl.fragments[0].variable});
     std.testing.expect(fragments[0] == .variable);
     std.testing.expectEqualStrings("end", fragments[0].variable);
 }
