@@ -1,10 +1,5 @@
 const std = @import("std");
-
-pub const Token = struct {
-    pub const dir_start = '{';
-    pub const dir_end = '}';
-    pub const esc = '\\';
-};
+const mem = std.mem;
 
 pub const FragType = enum { literal, variable, for_range, for_each };
 
@@ -25,330 +20,339 @@ pub const Frag = union(FragType) {
         capture_index_name: ?[]const u8,
         body: []const Frag,
     };
+
+    const FormatError = error{ DiskQuota, FileTooBig, InputOutput, NoSpaceLeft, AccessDenied, BrokenPipe, SystemResources, OperationAborted, NotOpenForWriting, WouldBlock, Unexpected };
+    pub fn format(value: Frag, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) FormatError!void {
+        switch (value) {
+            .literal => try writer.print("'{s}'", .{value.literal}),
+            .variable => try writer.print("{{{{{s}}}}}", .{value.variable}),
+            .for_range => {
+                try writer.print("for_range({}..{}) |{s}|", .{ value.for_range.start, value.for_range.end, value.for_range.capture_name });
+                // for (value.for_range.body) |child| try format(child, fmt, options, writer);
+                try writer.print("\n  {}", .{value.for_range.body});
+            },
+            .for_each => {
+                try writer.print("for_each({}) |{s},{s}|", .{ value.for_each.slice_name, value.for_each.capture_name, value.for_each.capture_index_name });
+                // for (value.for_each.body) |child| try format(child, fmt, options, writer);
+                try writer.print("\n  {}", .{value.for_each.body});
+            },
+        }
+    }
+};
+
+pub const Parser = struct {
+    buf: []const u8,
+    pos: usize = 0,
+    marked_pos: usize = 0,
+
+    // Returns a substring of the input starting from the current position
+    // and ending where `ch` is found or until the end if not found
+    pub fn until(self: *@This(), comptime ch: u8) []const u8 {
+        const start = self.pos;
+
+        if (start >= self.buf.len)
+            return &[_]u8{};
+
+        while (self.pos < self.buf.len) : (self.pos += 1) {
+            if (self.buf[self.pos] == ch) break;
+        }
+        return self.buf[start..self.pos];
+    }
+
+    pub fn untilOneOf(self: *@This(), comptime cs: []const u8) []const u8 {
+        const start = self.pos;
+
+        if (start >= self.buf.len)
+            return &[_]u8{};
+
+        while (self.pos < self.buf.len) : (self.pos += 1) {
+            if (mem.indexOfScalar(u8, cs, self.buf[self.pos])) |_| break;
+        }
+        return self.buf[start..self.pos];
+    }
+
+    pub fn untilStr(self: *@This(), comptime str: []const u8) []const u8 {
+        const start = self.pos;
+
+        if (start + str.len >= self.buf.len)
+            return &[_]u8{};
+
+        while (self.pos < self.buf.len) : (self.pos += 1) {
+            if (self.pos + str.len <= self.buf.len and
+                mem.eql(u8, self.buf[self.pos .. self.pos + str.len], str))
+                break;
+        }
+        return self.buf[start..self.pos];
+    }
+
+    // Returns the n-th next character or null if that's past the end
+    pub fn peek(self: *@This(), comptime n: usize) ?u8 {
+        return if (self.pos + n < self.buf.len) self.buf[self.pos + n] else null;
+    }
+
+    pub fn eos(self: @This()) bool {
+        return self.pos >= self.buf.len;
+    }
+
+    pub fn mark(self: *@This(), comptime n: usize) void {
+        self.marked_pos = self.pos + n;
+    }
+    pub fn fromMark(self: @This()) []const u8 {
+        return self.buf[self.marked_pos..self.pos];
+    }
 };
 
 fn showError(comptime msg: []const u8, args: anytype) noreturn {
     @compileError(std.fmt.comptimePrint(msg, args));
 }
 
-inline fn escape(comptime input: []const u8, output: [:0]u8, i: usize, start_idx: usize) []u8 {
-    const n1 = std.mem.replace(u8, input, "\\{", "{", output);
-    const n2 = std.mem.replace(u8, output, "\\}", "}", output);
-    const newlen = i - start_idx - (n1 + n2);
-    return std.mem.span(output[0..newlen]);
+inline fn escape(comptime input: []const u8) []u8 {
+    var output = [1]u8{0} ** input.len;
+    const n1 = mem.replace(u8, input, "\\{", "{", &output);
+    const n2 = mem.replace(u8, &output, "\\}", "}", &output);
+    return output[0 .. input.len - (n1 + n2)];
 }
 
-fn prevTokEql(c: u8, fmt: []const u8, i: usize) bool {
-    return i != 0 and fmt[i - 1] == c;
-}
-
-fn parseForRange(comptime input_: []const u8) !Frag.ForRange {
-    var input = input_;
-    std.debug.assert(std.mem.startsWith(u8, input, "for("));
-    input = input[4..];
-    var state: enum { start, dots, rparen, lbar } = .start;
+fn parseForRange(comptime input: []const u8) !Frag.ForRange {
+    std.debug.assert(mem.startsWith(u8, input, "for("));
     var result: Frag.ForRange = undefined;
-    var start_idx: usize = 0;
-    for (input) |c, i| {
-        switch (state) {
-            .start => if (c == '.' and i != 0 and input[i - 1] == '.') {
-                result.start = try std.fmt.parseInt(isize, input[start_idx .. i - 1], 10);
-                start_idx = i + 1;
-                state = .dots;
-            },
-            .dots => if (c == ')') {
-                result.end = try std.fmt.parseInt(isize, input[start_idx..i], 10);
-                start_idx = i + 1;
-                state = .rparen;
-            },
-            .rparen => if (c == '|') {
-                start_idx = i + 1;
-                state = .lbar;
-            },
-            .lbar => if (c == '|') {
-                // TODO: for some reason, this ends up as the original input start "for(0"
-                // if `result.capture_name = input[start_idx..i];`
-                // figure out why this copy is fixes things
-                const trimmed = std.mem.trim(u8, input[start_idx..i], " ");
-                var buf: [trimmed.len]u8 = undefined;
-                std.mem.copy(u8, &buf, trimmed);
-                result.capture_name = &buf;
-                break;
-            },
-        }
-    }
+    var parser = Parser{ .buf = input[4..] };
+    result.start = try std.fmt.parseInt(isize, trim(parser.untilStr("..")), 10);
+    parser.pos += 2;
+    result.end = try std.fmt.parseInt(isize, trim(parser.until(')')), 10);
+    _ = parser.until('|');
+    parser.pos += 1;
+    result.capture_name = trim(parser.until('|'));
     return result;
 }
 
-fn parseForEach(comptime input_: []const u8) !Frag.ForEach {
-    var input = input_;
-    std.debug.assert(std.mem.startsWith(u8, input, "for("));
-    input = input[4..];
-    var state: enum { start, rparen, lbar, comma } = .start;
+fn parseForEach(comptime input: []const u8) !Frag.ForEach {
+    std.debug.assert(mem.startsWith(u8, input, "for("));
+    var parser = Parser{ .buf = input[4..] };
     var result: Frag.ForEach = undefined;
     result.capture_index_name = null;
-    var start_idx: usize = 0;
-    for (input) |c, i| {
-        switch (state) {
-            .start => if (c == ')') {
-                // TODO: for some reason, this ends up as the original input start "for(0"
-                const trimmed = std.mem.trim(u8, input[start_idx..i], " ");
-                var buf: [trimmed.len]u8 = undefined;
-                std.mem.copy(u8, &buf, trimmed);
-                result.slice_name = &buf;
-                start_idx = i + 1;
-                state = .rparen;
-            },
-            .rparen => if (c == '|') {
-                start_idx = i + 1;
-                state = .lbar;
-            },
-            .lbar => if (c == ',' or c == '|') {
-                // TODO: for some reason, this ends up as the original input start "for(0"
-                const trimmed = std.mem.trim(u8, input[start_idx..i], " ");
-                var buf: [trimmed.len]u8 = undefined;
-                std.mem.copy(u8, &buf, trimmed);
-                result.capture_name = &buf;
-                if (c == ',') {
-                    start_idx = i + 1;
-                    state = .comma;
-                } else break;
-            },
-            .comma => if (c == '|') {
-                // TODO: for some reason, this ends up as the original input start "for(0"
-                const trimmed = std.mem.trim(u8, input[start_idx..i], " ");
-                var buf: [trimmed.len]u8 = undefined;
-                std.mem.copy(u8, &buf, trimmed);
-                result.capture_index_name = &buf;
-                break;
-            },
+    result.slice_name = trim(parser.until(')'));
+    _ = parser.until('|');
+    parser.pos += 1;
+    result.capture_name = trim(parser.untilOneOf(",|"));
+    if (parser.peek(0)) |c| {
+        if (c == ',') {
+            parser.pos += 1;
+            result.capture_index_name = trim(parser.until('|'));
         }
     }
     return result;
 }
 
-pub fn Template(comptime fmt: []const u8, comptime options: struct { eval_branch_quota: usize = 1000 }) type {
-    @setEvalBranchQuota(options.eval_branch_quota);
-    var build_fragments: []const Frag = &[0]Frag{};
-    var state = FragType.literal;
-    var newstate = state;
-    var start_idx: usize = 0;
-    var output: [fmt.len:0]u8 = [1:0]u8{0} ** fmt.len; // can't use undefined - leads to compiler error
-    var output_idx: usize = 0;
-    for (fmt) |c, i| {
-        var opt_escaped: ?[]u8 = null;
-        switch (c) {
-            Token.dir_start => {
-                if (state == .variable)
-                    showError("Too many levels of '{c}' at position {}", .{ Token.dir_start, i });
-                if (prevTokEql(Token.dir_start, fmt, i)) {
-                    opt_escaped = escape(fmt[start_idx .. i - 1], output[output_idx..], i - 1, start_idx);
-                    newstate = .variable;
-                }
-            },
-            Token.dir_end => {
-                if (prevTokEql(Token.esc, fmt, i)) continue;
-                if (state == .literal and prevTokEql(Token.dir_end, fmt, i))
-                    showError("Unmatched '{c}' at position {}", .{ Token.dir_end, i });
-                if (prevTokEql(Token.dir_end, fmt, i)) {
-                    const trimmed = std.mem.trim(u8, fmt[start_idx .. i - 1], " ");
-                    opt_escaped = escape(trimmed, output[output_idx..], i - 1, start_idx);
-                    if (std.mem.startsWith(u8, opt_escaped.?, "for"))
-                        state = if (std.mem.indexOf(u8, opt_escaped.?, "..") != null) .for_range else .for_each;
+/// trim trailing and leading whitespace
+fn trim(s_: []const u8) []const u8 {
+    var s = s_;
+    while (mem.indexOfScalar(u8, &std.ascii.spaces, s[0])) |_|
+        s = s[1..];
+    while (mem.indexOfScalar(u8, &std.ascii.spaces, s[s.len - 1])) |_|
+        s.len -= 1;
+    return s;
+}
 
-                    newstate = .literal;
+inline fn tokenizeFragments(comptime fmt: []const u8) []const Frag {
+    var fragments: []const Frag = &[0]Frag{};
+    var parser = Parser{ .buf = fmt };
+
+    while (!parser.eos()) : (parser.pos += 1) {
+        const c = parser.peek(0) orelse break;
+        switch (c) {
+            '{' => {
+                const next = parser.peek(1) orelse break;
+                if (next != '{') continue;
+                const lit = parser.fromMark();
+
+                if (lit.len != 0)
+                    fragments = fragments ++ [1]Frag{@unionInit(Frag, "literal", escape(lit))};
+                parser.mark(2);
+                parser.pos += 1;
+            },
+            '}' => {
+                const next = parser.peek(1) orelse break;
+                if (next != c) continue;
+                var state: FragType = .variable;
+                var variable = parser.fromMark();
+                if (variable.len != 0) {
+                    variable = trim(variable);
+                    // change state if this is a for_range or for_each
+                    if (mem.startsWith(u8, variable, "for")) {
+                        state = blk: {
+                            const dotsidx = mem.indexOf(u8, variable, "..") orelse break :blk .for_each;
+                            const rparidx = mem.indexOf(u8, variable, ")") orelse return error.MissingRightParen;
+                            break :blk if (dotsidx < rparidx) .for_range else .for_each;
+                        };
+                        fragments = fragments ++ if (state == .for_range)
+                            [1]Frag{@unionInit(Frag, @tagName(state), try parseForRange(escape(variable)))}
+                        else
+                            [1]Frag{@unionInit(Frag, @tagName(state), try parseForEach(escape(variable)))};
+                    } else
+                        fragments = fragments ++ [1]Frag{@unionInit(Frag, @tagName(state), escape(variable))};
                 }
+                parser.mark(2);
+                parser.pos += 1;
             },
             else => {},
         }
+    }
+    if (parser.marked_pos < parser.buf.len) {
+        const lit = parser.buf[parser.marked_pos..];
+        fragments = fragments ++ [1]Frag{@unionInit(Frag, "literal", escape(lit))};
+    }
+    return fragments;
+}
 
-        if (opt_escaped) |escaped| {
-            if (escaped.len > 0) {
-                const escaped0 = std.mem.spanZ(@ptrCast(*const [:0]u8, &escaped).*); // remove trailing zeros
-                build_fragments = build_fragments ++ switch (state) {
-                    .literal, .variable => &[1]Frag{@unionInit(Frag, @tagName(state), escaped0)},
-                    .for_range => blk: {
-                        const for_range = parseForRange(escaped0) catch |e| showError("couldn't parse for range: {s}", .{@errorName(e)});
-                        break :blk &[1]Frag{@unionInit(Frag, @tagName(state), for_range)};
-                    },
-                    .for_each => blk: {
-                        const for_each = parseForEach(escaped0) catch |e| showError("couldn't parse for each: {s}", .{@errorName(e)});
-                        break :blk &[1]Frag{@unionInit(Frag, @tagName(state), for_each)};
-                    },
-                };
-                output_idx += escaped0.len;
-            }
-            state = newstate;
-            start_idx = i + 1;
+/// recursively appends children of for_range and for_each loops to their bodies
+/// until end variable reached
+inline fn parseFragments(comptime flat_frags: []const Frag) []const Frag {
+    comptime var result: []const Frag = &[0]Frag{};
+    var i: comptime_int = 0;
+    while (i < flat_frags.len) : (i += 1) {
+        var frag = flat_frags[i];
+        // append children until end
+        if (frag == .for_range or frag == .for_each) {
+            var frag_tag = &@field(frag, @tagName(frag));
+            i += 1;
+            frag_tag.body = parseFragments(flat_frags[i..]);
+            i += frag_tag.body.len;
         }
+        if (frag == .variable and mem.eql(u8, frag.variable, "end")) break;
+        result = result ++ &[1]Frag{frag};
     }
-    if (start_idx < fmt.len) {
-        const escaped = escape(fmt[start_idx..], output[output_idx..], fmt.len, start_idx);
-        build_fragments = build_fragments ++ &[1]Frag{.{ .literal = escaped }};
-    }
+    return result;
+}
+
+const Options = struct { eval_branch_quota: usize = 1000 };
+pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
+    @setEvalBranchQuota(options.eval_branch_quota);
+    var tokens = tokenizeFragments(fmt);
 
     return struct {
-        pub const fragments = blk: {
-            var result: []const Frag = &[0]Frag{};
-            var i: usize = 0;
-            while (i < build_fragments.len) : (i += 1) {
-                var frag = build_fragments[i];
-                if (frag == .for_range or frag == .for_each) {
-                    var frag_tag = &@field(frag, @tagName(frag));
-                    frag_tag.body = &[0]Frag{};
-                    i += 1;
-                    while (!(build_fragments[i] == .variable and std.mem.eql(u8, build_fragments[i].variable, "end"))) : (i += 1) {
-                        frag_tag.body = frag_tag.body ++ &[1]Frag{build_fragments[i]};
-                    }
-                }
-                result = result ++ &[1]Frag{frag};
-            }
-            break :blk result;
-        };
-
-        // const Error = error{BufferTooSmall};
-        // inline fn bufPrintFrag(comptime frag: Frag, buf: []u8, args: anytype) Error!usize {
-        //     comptime {
-        //         var bufi: usize = 0;
-        //         if (frag == .for_range) {
-        //             var j = frag.for_range.start;
-        //             while (j < frag.for_range.end) : (j += 1) {
-        //                 for (frag.for_range.body) |body_frag| {
-        //                     // if (bufi + target.len > buf.len) return error.BufferTooSmall;
-        //                     // std.mem.copy(u8, buf[bufi..], target);
-        //                     // bufi += target.len;
-        //                     // bufPrint(buf[bufi..])
-        //                     if (body_frag == .variable and std.mem.eql(u8, body_frag.variable, frag.for_range.capture_name)) {
-        //                         const T = comptime @Type(.{
-        //                             // std.builtin.TypeInfo
-        //                             .Struct = .{
-        //                                 .layout = .Auto,
-        //                                 .fields = &[_]std.builtin.TypeInfo.StructField{.{
-        //                                     .name = body_frag.variable,
-        //                                     .field_type = isize,
-        //                                     .default_value = null,
-        //                                     .is_comptime = false,
-        //                                     .alignment = @alignOf(isize),
-        //                                 }},
-        //                             },
-        //                         });
-        //                         const t: T = undefined;
-        //                         @field(t, body_frag.variable) = j;
-        //                         bufi += try bufPrintFrag(body_frag, buf[bufi..], t); //catch |e| showError("Error: bufPrintFrag {}", .{@errorName(e)});
-        //                     } else
-        //                         bufi += try bufPrintFrag(body_frag, buf[bufi..], args); //catch |e| showError("Error: bufPrintFrag {}", .{@errorName(e)});
-        //                 }
-        //             }
-        //         } else {
-        //             const target = switch (frag) {
-        //                 .literal => frag.literal,
-        //                 .variable => @field(args, frag.variable),
-        //                 else => unreachable,
-        //             };
-        //             if (target.len > buf.len) return error.BufferTooSmall;
-        //             std.mem.copy(u8, buf, target);
-        //             bufi = target.len;
-        //         }
-        //         return bufi;
-        //     }
-        // }
+        // Currently fragments is a flat list of fragments
+        // need to populate for_range.body and for_each.body with
+        // nested fragments.
+        // TODO: This only works for one level of depth.
+        pub const fragments = parseFragments(tokens);
 
         pub fn bufPrint(buf: []u8, args: anytype) ![]u8 {
-            var bufi: usize = 0;
-            inline for (fragments) |frag, i| {
-                const target = switch (frag) {
-                    .literal => frag.literal,
-                    .variable => @field(args, frag.variable),
-                    .for_range => {
-                        var j = frag.for_range.start;
-                        while (j < frag.for_range.end) : (j += 1) {
-                            for (frag.for_range.body) |body_frag| {
-                                if (body_frag == .variable and
-                                    std.mem.eql(u8, body_frag.variable, frag.for_range.capture_name))
-                                {
-                                    bufi += std.fmt.formatIntBuf(buf[bufi..], j, 10, false, .{});
-                                } else {
-                                    const bodytarget = switch (body_frag) {
-                                        .literal => body_frag.literal,
-                                        .variable => blk: {
-                                            inline for (std.meta.fields(@TypeOf(args))) |f| {
-                                                if (std.mem.eql(u8, f.name, body_frag.variable))
-                                                    break :blk @field(args, f.name);
-                                            }
-                                            unreachable;
-                                        },
-                                        else => unreachable,
-                                    };
-                                    if (bodytarget.len > buf.len) return error.BufferTooSmall;
-                                    std.mem.copy(u8, buf[bufi..], bodytarget);
-                                    bufi += bodytarget.len;
-                                }
+            var fbs = std.io.fixedBufferStream(buf);
+
+            try bufPrintImpl(.{}, fragments, fbs.writer(), args);
+            return fbs.getWritten();
+        }
+
+        pub const BufPrintError = error{ MissingVariable, BufferTooSmall } || std.io.FixedBufferStream([]u8).WriteError;
+        pub fn bufPrintImpl(comptime scopes: anytype, comptime frags: []const Frag, writer: anytype, args: anytype) BufPrintError!void {
+            inline for (frags) |frag, i| {
+                switch (frag) {
+                    .literal => _ = try writer.write(frag.literal),
+                    .variable => {
+                        if (@hasField(@TypeOf(args), frag.variable)) {
+                            _ = try writer.write(@field(args, frag.variable));
+                        } else inline for (scopes) |scope| { // search scopes
+                            if (comptime mem.eql(u8, scope[0], frag.variable)) {
+                                _ = try writer.print("{}", .{scope[1]});
                             }
                         }
-                        continue;
+                    },
+                    .for_range => {
+                        comptime var j = frag.for_range.start;
+                        inline while (j < frag.for_range.end) : (j += 1) {
+                            try bufPrintImpl(
+                                scopes ++ .{.{ frag.for_range.capture_name, j }},
+                                frag.for_range.body,
+                                writer,
+                                args,
+                            );
+                        }
                     },
                     .for_each => {
                         const slice = @field(args, frag.for_each.slice_name);
-                        for (slice) |item, index| {
-                            for (frag.for_each.body) |body_frag| {
-                                if (body_frag == .variable and frag.for_each.capture_index_name != null and
-                                    std.mem.eql(u8, body_frag.variable, frag.for_each.capture_index_name.?))
-                                {
-                                    bufi += std.fmt.formatIntBuf(buf[bufi..], index, 10, false, .{});
-                                } else if (body_frag == .variable and
-                                    std.mem.eql(u8, body_frag.variable, frag.for_each.capture_name))
-                                {
-                                    const result = std.fmt.bufPrint(buf[bufi..], "{}", .{item}) catch unreachable;
-                                    bufi += result.len;
-                                } else {
-                                    const bodytarget = switch (body_frag) {
-                                        .literal => body_frag.literal,
-                                        .variable => blk: {
-                                            inline for (std.meta.fields(@TypeOf(args))) |f| {
-                                                if (std.mem.eql(u8, f.name, body_frag.variable))
-                                                    break :blk @field(args, f.name);
-                                            }
-                                            unreachable;
-                                        },
-                                        else => unreachable,
-                                    };
-                                    if (bodytarget.len > buf.len) return error.BufferTooSmall;
-                                    std.mem.copy(u8, buf[bufi..], bodytarget);
-                                    bufi += bodytarget.len;
-                                }
-                            }
+                        inline for (slice) |item, index| {
+                            if (frag.for_each.capture_index_name) |idx_name|
+                                try bufPrintImpl(
+                                    scopes ++ .{ .{ frag.for_each.capture_name, item }, .{ idx_name, index } },
+                                    frag.for_each.body,
+                                    writer,
+                                    args,
+                                )
+                            else
+                                try bufPrintImpl(
+                                    scopes ++ .{.{ frag.for_each.capture_name, item }},
+                                    frag.for_each.body,
+                                    writer,
+                                    args,
+                                );
                         }
-                        continue;
                     },
-                };
-                if (target.len > buf.len) return error.BufferTooSmall;
-                std.mem.copy(u8, buf[bufi..], target);
-                bufi += target.len;
-            }
-            return buf[0..bufi];
-        }
-
-        pub fn allocPrint(allocator: *std.mem.Allocator, args: anytype) ![]u8 {
-            const result = try allocator.alloc(u8, countSize(fragments, args));
-            return try bufPrint(result, args);
-        }
-
-        fn countSize(comptime frags: []const Frag, args: anytype) usize {
-            var size: usize = 0;
-            inline for (frags) |frag, i| {
-                switch (frag) {
-                    .literal => size += frag.literal.len,
-                    .variable => size += @field(args, frag.variable).len,
-                    .for_range => @panic("todo"),
-                    // {
-                    //     var j = frag.for_range.start;
-                    //     while (j < frag.for_range.end) : (j += 1)
-                    //         size += countSize(frag.for_range.body, args);
-                    // },
-                    .for_each => @panic("todo"),
                 }
             }
-            return size;
+        }
+
+        pub fn allocPrint(allocator: *mem.Allocator, args: anytype) ![]u8 {
+            var writer = std.io.countingWriter(std.io.null_writer);
+            try bufPrintImpl(.{}, fragments, writer.writer(), args);
+            const buf = try allocator.alloc(u8, writer.bytes_written);
+            return try bufPrint(buf, args);
         }
     };
+}
+
+fn StrHasher(comptime min_bytes: usize) type {
+    return struct {
+        const byte_len = std.math.ceilPowerOfTwo(usize, min_bytes) catch |e| @compileError("invalid min_bytes: " ++ @errorName(e));
+        const I = std.meta.Int(.unsigned, byte_len * 8);
+
+        fn case(comptime src: []const u8) I {
+            if (src.len > byte_len) @compileError("String too long");
+            return comptime match(src) catch |e| @compileError("Error: " ++ @errorName(e));
+        }
+        fn match(src: []const u8) !I {
+            if (src.len > byte_len) return error.StringTooLong;
+            var dest = [1]u8{0} ** byte_len;
+            std.mem.copy(u8, &dest, src);
+            return std.mem.readIntNative(I, &dest);
+        }
+    };
+}
+
+test "string match" {
+    const E = enum {
+        a = 1,
+        ab = 2,
+        abc = 3,
+        inv = 0,
+        const Self = @This();
+        pub fn fromStr(s: []const u8) !?Self {
+            const strhasher = StrHasher(4);
+            inline for (std.meta.fields(Self)) |f|
+                if (strhasher.case(f.name) == try strhasher.match(s))
+                    return @field(Self, f.name);
+            return null;
+        }
+    };
+    const Sh = StrHasher(4);
+    for ([_][]const u8{ "a", "ab", "abc", "inv" }) |name| {
+        const hash = try Sh.match(name);
+        const e: E = switch (hash) {
+            Sh.case("a") => .a,
+            Sh.case("ab") => .ab,
+            Sh.case("abc") => .abc,
+            Sh.case("inv") => .inv,
+            else => unreachable,
+        };
+        std.testing.expectEqual(try E.fromStr(name), e);
+    }
+}
+
+test "end" {
+    const text = "{{ end   }}";
+    const fragments = comptime tokenizeFragments(text);
+    std.testing.expectEqual(fragments.len, 1);
+    // std.debug.print("{}\n", .{tmpl.fragments[0].variable});
+    std.testing.expect(fragments[0] == .variable);
+    std.testing.expectEqualStrings("end", fragments[0].variable);
 }
