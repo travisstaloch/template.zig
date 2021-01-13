@@ -46,8 +46,8 @@ pub const Parser = struct {
     pos: usize = 0,
     marked_pos: usize = 0,
 
-    // Returns a substring of the input starting from the current position
-    // and ending where `ch` is found or until the end if not found
+    /// Returns a substring of the input starting from the current position
+    /// and ending where `ch` is found or until the end if not found
     pub fn until(self: *@This(), comptime ch: u8) []const u8 {
         const start = self.pos;
 
@@ -60,6 +60,8 @@ pub const Parser = struct {
         return self.buf[start..self.pos];
     }
 
+    /// Returns a substring of the input starting from the current position
+    /// and ending where one of `cs` is found or until the end if not found
     pub fn untilOneOf(self: *@This(), comptime cs: []const u8) []const u8 {
         const start = self.pos;
 
@@ -72,6 +74,8 @@ pub const Parser = struct {
         return self.buf[start..self.pos];
     }
 
+    /// Returns a substring of the input starting from the current position
+    /// and ending where `str` is found or until the end if not found
     pub fn untilStr(self: *@This(), comptime str: []const u8) []const u8 {
         const start = self.pos;
 
@@ -86,18 +90,23 @@ pub const Parser = struct {
         return self.buf[start..self.pos];
     }
 
-    // Returns the n-th next character or null if that's past the end
+    /// Returns the n-th next character or null if that's past the end
     pub fn peek(self: *@This(), comptime n: usize) ?u8 {
         return if (self.pos + n < self.buf.len) self.buf[self.pos + n] else null;
     }
 
+    /// end of stream?
     pub fn eos(self: @This()) bool {
         return self.pos >= self.buf.len;
     }
 
+    /// sets marked_pos to the current pos + n
     pub fn mark(self: *@This(), comptime n: usize) void {
         self.marked_pos = self.pos + n;
     }
+
+    /// Returns a substring of the input starting from
+    /// `marked_pos` until `pos`
     pub fn fromMark(self: @This()) []const u8 {
         return self.buf[self.marked_pos..self.pos];
     }
@@ -210,7 +219,7 @@ inline fn tokenizeFragments(comptime fmt: []const u8) []const Frag {
 
 /// recursively appends children of for_range and for_each loops to their bodies
 /// until end variable reached
-inline fn parseFragments(comptime flat_frags: []const Frag) []const Frag {
+inline fn nestFragments(comptime flat_frags: []const Frag) []const Frag {
     comptime var result: []const Frag = &[0]Frag{};
     var i: comptime_int = 0;
     while (i < flat_frags.len) : (i += 1) {
@@ -219,7 +228,7 @@ inline fn parseFragments(comptime flat_frags: []const Frag) []const Frag {
         if (frag == .for_range or frag == .for_each) {
             var frag_tag = &@field(frag, @tagName(frag));
             i += 1;
-            frag_tag.body = parseFragments(flat_frags[i..]);
+            frag_tag.body = nestFragments(flat_frags[i..]);
             i += frag_tag.body.len;
         }
         if (frag == .end) break;
@@ -237,7 +246,7 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
         // tokens is a flat list of fragments here.
         // need to populate for_range.body and for_each.body with
         // nested fragments.
-        pub const fragments = parseFragments(tokens);
+        pub const fragments = nestFragments(tokens);
 
         pub fn bufPrint(buf: []u8, args: anytype) ![]u8 {
             var fbs = std.io.fixedBufferStream(buf);
@@ -245,7 +254,7 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
             return fbs.getWritten();
         }
 
-        pub const BufPrintError = error{ MissingVariable, BufferTooSmall } || std.io.FixedBufferStream([]u8).WriteError;
+        pub const BufPrintError = std.io.FixedBufferStream([]u8).WriteError;
         pub fn bufPrintImpl(comptime scopes: anytype, comptime frags: []const Frag, writer: anytype, args: anytype) BufPrintError!void {
             inline for (frags) |frag, i| {
                 switch (frag) {
@@ -253,9 +262,15 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
                     .variable => {
                         if (@hasField(@TypeOf(args), frag.variable)) {
                             _ = try writer.write(@field(args, frag.variable));
-                        } else inline for (scopes) |scope| { // search scopes
-                            if (comptime mem.eql(u8, scope[0], frag.variable)) {
-                                _ = try writer.print("{}", .{scope[1]});
+                        } else {
+                            // TODO: make scopes detect collisions and not duplicate fields.
+                            // somehow use @Type or std.meta.Tuple
+                            // ---
+                            // search scopes
+                            inline for (scopes) |scope| {
+                                if (comptime mem.eql(u8, scope[0], frag.variable)) {
+                                    _ = try writer.print("{}", .{scope[1]});
+                                }
                             }
                         }
                     },
