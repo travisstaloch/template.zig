@@ -71,7 +71,7 @@ test "variables" {
         const text = "{{name}}";
         const tmpl = Template(text, .{});
         t_expectEqual(tmpl.fragments.len, 1);
-        expectFragment(tmpl.fragments[0], .variable, "name");
+        expectFragment(tmpl.fragments[0], .action, "name");
         try expectPrinted("zero", tmpl, .{ .name = "zero" });
     }
     {
@@ -79,9 +79,9 @@ test "variables" {
         const tmpl = Template(text, .{});
         t_expectEqual(tmpl.fragments.len, 4);
         expectFragment(tmpl.fragments[0], .literal, "Hi ");
-        expectFragment(tmpl.fragments[1], .variable, "name");
+        expectFragment(tmpl.fragments[1], .action, "name");
         expectFragment(tmpl.fragments[2], .literal, " at index #");
-        expectFragment(tmpl.fragments[3], .variable, "index");
+        expectFragment(tmpl.fragments[3], .action, "index");
         try expectPrinted("Hi zero at index #000", tmpl, .{ .name = "zero", .index = "000" });
     }
 }
@@ -97,7 +97,7 @@ test "for range" {
         t.expectEqualStrings("index", tmpl.fragments[0].for_range.capture_name);
         t_expectEqual(tmpl.fragments[0].for_range.body.len, 3);
         expectFragment(tmpl.fragments[0].for_range.body[0], .literal, " a ");
-        expectFragment(tmpl.fragments[0].for_range.body[1], .variable, "index");
+        expectFragment(tmpl.fragments[0].for_range.body[1], .action, "index");
         expectFragment(tmpl.fragments[0].for_range.body[2], .literal, " b ");
         t.expect(tmpl.fragments[1] == .literal);
         t.expectEqualStrings(" c", tmpl.fragments[1].literal);
@@ -113,14 +113,14 @@ test "for range" {
         t.expect(tmpl.fragments[0] == .for_range);
         t_expectEqual(tmpl.fragments[0].for_range.body.len, 4);
         expectFragment(tmpl.fragments[0].for_range.body[0], .literal, "level1 ");
-        expectFragment(tmpl.fragments[0].for_range.body[1], .variable, "index");
+        expectFragment(tmpl.fragments[0].for_range.body[1], .action, "index");
         t.expect(tmpl.fragments[0].for_range.body[2] == .for_range);
         t.expectEqualStrings("index2", tmpl.fragments[0].for_range.body[2].for_range.capture_name);
-        expectFragment(tmpl.fragments[0].for_range.body[1], .variable, "index");
+        expectFragment(tmpl.fragments[0].for_range.body[1], .action, "index");
         t_expectEqual(tmpl.fragments[0].for_range.body[2].for_range.body.len, 3);
         expectFragment(tmpl.fragments[0].for_range.body[2].for_range.body[0], .literal, " level2 ");
-        expectFragment(tmpl.fragments[0].for_range.body[2].for_range.body[1], .variable, "index");
-        expectFragment(tmpl.fragments[0].for_range.body[2].for_range.body[2], .variable, "index2");
+        expectFragment(tmpl.fragments[0].for_range.body[2].for_range.body[1], .action, "index");
+        expectFragment(tmpl.fragments[0].for_range.body[2].for_range.body[2], .action, "index2");
         expectFragment(tmpl.fragments[0].for_range.body[3], .literal, " endlevel1 ");
         try expectPrinted("level1 0 level2 00 endlevel1 level1 1 level2 10 endlevel1 ", tmpl, .{});
     }
@@ -139,15 +139,21 @@ test "foreach" {
     t.expectEqualStrings("index", tmpl.fragments[0].for_each.capture_index_name.?);
     t_expectEqual(tmpl.fragments[0].for_each.body.len, 4);
     expectFragment(tmpl.fragments[0].for_each.body[0], .literal, "\nPrint ");
-    expectFragment(tmpl.fragments[0].for_each.body[1], .variable, "item");
+    expectFragment(tmpl.fragments[0].for_each.body[1], .action, "item");
     expectFragment(tmpl.fragments[0].for_each.body[2], .literal, " at ");
-    expectFragment(tmpl.fragments[0].for_each.body[3], .variable, "index");
+    expectFragment(tmpl.fragments[0].for_each.body[3], .action, "index");
     try expectPrinted("\nPrint 84 at 0\nPrint 168 at 1", tmpl, .{ .list = &[_]u8{ 84, 168 } });
 }
 
-// ---
-// readme tests
-// ---
+test "scopes" {
+    const text = "{{for(0..1)|i|}}{{for(0..1)|i|}}{{end}}{{end}}";
+    const tmpl = Template(text, .{ .eval_branch_quota = 2000 });
+    t.expectError(error.DuplicateKey, tmpl.bufPrint(&print_buf, .{}));
+}
+
+// --------------------
+// --- readme tests ---
+// --------------------
 test "template variables" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
@@ -194,6 +200,6 @@ test "for each loop" {
     defer std.testing.allocator.free(message2);
     std.testing.expectEqualStrings("5 times: 0-0,1-1,2-2,3-3,4-4,", message2);
 }
-// ---
-// end readme tests
-// ---
+// --------------------
+// - end readme tests -
+// --------------------

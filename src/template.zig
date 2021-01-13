@@ -1,11 +1,11 @@
 const std = @import("std");
 const mem = std.mem;
 
-pub const FragType = enum { literal, variable, for_range, for_each, end };
+pub const FragType = enum { literal, action, for_range, for_each, end };
 
 pub const Frag = union(FragType) {
     literal: []const u8,
-    variable: []const u8,
+    action: []const u8,
     for_range: ForRange,
     for_each: ForEach,
     end,
@@ -26,7 +26,7 @@ pub const Frag = union(FragType) {
     pub fn format(value: Frag, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) FormatError!void {
         switch (value) {
             .literal => try writer.print("'{s}'", .{value.literal}),
-            .variable => try writer.print("{{{{{s}}}}}", .{value.variable}),
+            .action => try writer.print("{{{{{s}}}}}", .{value.action}),
             .for_range => {
                 try writer.print("for_range({}..{}) |{s}|", .{ value.for_range.start, value.for_range.end, value.for_range.capture_name });
                 // for (value.for_range.body) |child| try format(child, fmt, options, writer);
@@ -184,25 +184,25 @@ inline fn tokenizeFragments(comptime fmt: []const u8) []const Frag {
             '}' => {
                 const next = parser.peek(1) orelse break;
                 if (next != c) continue;
-                var state: FragType = .variable;
-                var variable = parser.fromMark();
-                if (variable.len != 0) {
-                    variable = trim(variable);
+                var state: FragType = .action;
+                var action = parser.fromMark();
+                if (action.len != 0) {
+                    action = trim(action);
                     // change state if this is a for_range or for_each
-                    if (mem.startsWith(u8, variable, "for")) {
+                    if (mem.startsWith(u8, action, "for")) {
                         state = blk: {
-                            const dotsidx = mem.indexOf(u8, variable, "..") orelse break :blk .for_each;
-                            const rparidx = mem.indexOf(u8, variable, ")") orelse return error.MissingRightParen;
+                            const dotsidx = mem.indexOf(u8, action, "..") orelse break :blk .for_each;
+                            const rparidx = mem.indexOf(u8, action, ")") orelse return error.MissingRightParen;
                             break :blk if (dotsidx < rparidx) .for_range else .for_each;
                         };
                         fragments = fragments ++ if (state == .for_range)
-                            [1]Frag{@unionInit(Frag, @tagName(state), try parseForRange(escape(variable)))}
+                            [1]Frag{.{ .for_range = try parseForRange(escape(action)) }}
                         else
-                            [1]Frag{@unionInit(Frag, @tagName(state), try parseForEach(escape(variable)))};
-                    } else if (mem.eql(u8, variable, "end"))
-                        fragments = fragments ++ [1]Frag{@unionInit(Frag, "end", {})}
+                            [1]Frag{.{ .for_each = try parseForEach(escape(action)) }};
+                    } else if (mem.eql(u8, action, "end"))
+                        fragments = fragments ++ [1]Frag{.end}
                     else
-                        fragments = fragments ++ [1]Frag{@unionInit(Frag, @tagName(state), escape(variable))};
+                        fragments = fragments ++ [1]Frag{.{ .action = escape(action) }};
                 }
                 parser.mark(2);
                 parser.pos += 1;
@@ -218,7 +218,7 @@ inline fn tokenizeFragments(comptime fmt: []const u8) []const Frag {
 }
 
 /// recursively appends children of for_range and for_each loops to their bodies
-/// until end variable reached
+/// until end action reached
 inline fn nestFragments(comptime flat_frags: []const Frag) []const Frag {
     comptime var result: []const Frag = &[0]Frag{};
     var i: comptime_int = 0;
@@ -250,26 +250,26 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
 
         pub fn bufPrint(buf: []u8, args: anytype) ![]u8 {
             var fbs = std.io.fixedBufferStream(buf);
-            try bufPrintImpl(.{}, fragments, fbs.writer(), args);
+            comptime var scopes: []const []const ScopeEntry = &[_][]const ScopeEntry{};
+            try bufPrintImpl(scopes, fragments, fbs.writer(), args);
             return fbs.getWritten();
         }
 
-        pub const BufPrintError = std.io.FixedBufferStream([]u8).WriteError;
-        pub fn bufPrintImpl(comptime scopes: anytype, comptime frags: []const Frag, writer: anytype, args: anytype) BufPrintError!void {
+        pub const BufPrintError = error{DuplicateKey} || std.io.FixedBufferStream([]u8).WriteError;
+        fn bufPrintImpl(comptime scopes: []const []const ScopeEntry, comptime frags: []const Frag, writer: anytype, args: anytype) BufPrintError!void {
             inline for (frags) |frag, i| {
                 switch (frag) {
                     .literal => _ = try writer.write(frag.literal),
-                    .variable => {
-                        if (@hasField(@TypeOf(args), frag.variable)) {
-                            _ = try writer.write(@field(args, frag.variable));
+                    .action => {
+                        if (@hasField(@TypeOf(args), frag.action)) {
+                            _ = try writer.write(@field(args, frag.action));
                         } else {
-                            // TODO: make scopes detect collisions and not duplicate fields.
-                            // somehow use @Type or std.meta.Tuple
-                            // ---
                             // search scopes
                             inline for (scopes) |scope| {
-                                if (comptime mem.eql(u8, scope[0], frag.variable)) {
-                                    _ = try writer.print("{}", .{scope[1]});
+                                inline for (scope) |entry| {
+                                    if (mem.eql(u8, entry.key, frag.action)) {
+                                        _ = try writer.print("{}", .{entry.value});
+                                    }
                                 }
                             }
                         }
@@ -278,7 +278,7 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
                         comptime var j = frag.for_range.start;
                         inline while (j < frag.for_range.end) : (j += 1) {
                             try bufPrintImpl(
-                                scopes ++ .{.{ frag.for_range.capture_name, j }},
+                                try appendScope(scopes, frag.for_range.capture_name, j),
                                 frag.for_range.body,
                                 writer,
                                 args,
@@ -290,14 +290,14 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
                         inline for (slice) |item, index| {
                             if (frag.for_each.capture_index_name) |idx_name|
                                 try bufPrintImpl(
-                                    scopes ++ .{ .{ frag.for_each.capture_name, item }, .{ idx_name, index } },
+                                    try appendScope(try appendScope(scopes, frag.for_each.capture_name, item), idx_name, index),
                                     frag.for_each.body,
                                     writer,
                                     args,
                                 )
                             else
                                 try bufPrintImpl(
-                                    scopes ++ .{.{ frag.for_each.capture_name, item }},
+                                    try appendScope(scopes, frag.for_each.capture_name, item),
                                     frag.for_each.body,
                                     writer,
                                     args,
@@ -308,12 +308,19 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
                 }
             }
         }
+        const ScopeEntry = struct { key: []const u8, value: anytype };
 
         pub fn allocPrint(allocator: *mem.Allocator, args: anytype) ![]u8 {
             var writer = std.io.countingWriter(std.io.null_writer);
-            try bufPrintImpl(.{}, fragments, writer.writer(), args);
+            comptime var scopes: []const []const ScopeEntry = &[_][]const ScopeEntry{};
+            try bufPrintImpl(scopes, fragments, writer.writer(), args);
             const buf = try allocator.alloc(u8, writer.bytes_written);
             return try bufPrint(buf, args);
+        }
+
+        fn appendScope(comptime scopes: []const []const ScopeEntry, comptime key: []const u8, value: anytype) ![]const []const ScopeEntry {
+            for (scopes) |scope| for (scope) |entry| if (mem.eql(u8, entry.key, key)) return error.DuplicateKey;
+            return scopes ++ [_][]const ScopeEntry{&[1]ScopeEntry{.{ .key = key, .value = value }}};
         }
     };
 }
