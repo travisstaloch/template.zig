@@ -8,7 +8,7 @@ All 12 tests passed.
 $ zig build # results in zig-cache/lib/libtemplate.zig.a
 ```
 
-from [tests.zig](src/tests.zig)
+from end of [tests.zig](src/tests.zig)
 ```zig
 test "template variables" {
     const Tmpl = @import("template.zig").Template;
@@ -61,5 +61,7 @@ test "for each loop" {
 ```
 
 # resources
+- [fengb/zig-tmpl](https://github.com/fengb/zig-tmpl)
 - [mlarouche/stringtime](https://github.com/mlarouche/stringtime)
 - [zig/lib/std/fmt.zig](https://github.com/ziglang/zig/blob/master/lib/std/fmt.zig)
+- [golang/text/template/](https://golang.org/src/text/template/)
