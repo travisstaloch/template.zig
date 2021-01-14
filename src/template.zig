@@ -84,7 +84,7 @@ pub const Parser = struct {
 
         while (self.pos < self.buf.len) : (self.pos += 1) {
             if (self.pos + str.len <= self.buf.len and
-                mem.eql(u8, self.buf[self.pos .. self.pos + str.len], str))
+                memeql(self.buf[self.pos .. self.pos + str.len], str))
                 break;
         }
         return self.buf[start..self.pos];
@@ -199,7 +199,7 @@ inline fn tokenizeFragments(comptime fmt: []const u8) []const Frag {
                             [1]Frag{.{ .for_range = try parseForRange(escape(action)) }}
                         else
                             [1]Frag{.{ .for_each = try parseForEach(escape(action)) }};
-                    } else if (mem.eql(u8, action, "end"))
+                    } else if (memeql(action, "end"))
                         fragments = fragments ++ [1]Frag{.end}
                     else
                         fragments = fragments ++ [1]Frag{.{ .action = escape(action) }};
@@ -267,7 +267,7 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
                             // search scopes
                             inline for (scopes) |scope| {
                                 inline for (scope) |entry| {
-                                    if (mem.eql(u8, entry.key, frag.action)) {
+                                    if (memeql(entry.key, frag.action)) {
                                         _ = try writer.print("{}", .{entry.value});
                                     }
                                 }
@@ -319,7 +319,7 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
         }
 
         fn appendScope(comptime scopes: []const []const ScopeEntry, comptime key: []const u8, value: anytype) ![]const []const ScopeEntry {
-            for (scopes) |scope| for (scope) |entry| if (mem.eql(u8, entry.key, key)) return error.DuplicateKey;
+            for (scopes) |scope| for (scope) |entry| if (memeql(entry.key, key)) return error.DuplicateKey;
             return scopes ++ [_][]const ScopeEntry{&[1]ScopeEntry{.{ .key = key, .value = value }}};
         }
     };
@@ -342,6 +342,12 @@ fn StrHasher(comptime min_bytes: usize) type {
             return std.mem.readIntNative(I, &dest);
         }
     };
+}
+
+inline fn memeql(a: []const u8, comptime b: []const u8) bool {
+    // const Sh = StrHasher(b.len);
+    // return (comptime Sh.case(b)) == Sh.match(a) catch return false;
+    return mem.eql(u8, a, b);
 }
 
 test "main tests" {
