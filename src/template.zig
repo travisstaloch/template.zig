@@ -26,17 +26,18 @@ pub const Frag = union(FragType) {
     pub fn format(value: Frag, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) FormatError!void {
         switch (value) {
             .literal => try writer.print("'{s}'", .{value.literal}),
-            .action => try writer.print("{{{{{s}}}}}", .{value.action}),
+            .action => try writer.print("'{{{{{s}}}}}'", .{value.action}),
             .for_range => {
-                try writer.print("for_range({}..{}) |{s}|", .{ value.for_range.start, value.for_range.end, value.for_range.capture_name });
-                // for (value.for_range.body) |child| try format(child, fmt, options, writer);
+                try writer.print("for({}..{}) |{s}|", .{ value.for_range.start, value.for_range.end, value.for_range.capture_name });
+                // for (value.for_range.body) |child| try writer.print("  {}", .{child});
                 try writer.print("\n  {}", .{value.for_range.body});
             },
             .for_each => {
-                try writer.print("for_each({}) |{s},{s}|", .{ value.for_each.slice_name, value.for_each.capture_name, value.for_each.capture_index_name });
-                // for (value.for_each.body) |child| try format(child, fmt, options, writer);
+                try writer.print("for({s}) |{s},{s}|", .{ value.for_each.slice_name, value.for_each.capture_name, value.for_each.capture_index_name });
+                // for (value.for_each.body) |child| try writer.print("  {}", .{child});
                 try writer.print("\n  {}", .{value.for_each.body});
             },
+            .end => unreachable,
         }
     }
 };
@@ -123,32 +124,32 @@ inline fn escape(comptime input: []const u8) []u8 {
     return output[0 .. input.len - (n1 + n2)];
 }
 
-fn parseForRange(comptime input: []const u8) !Frag.ForRange {
+fn parseForRange(comptime input: []const u8) !Frag {
     std.debug.assert(mem.startsWith(u8, input, "for("));
-    var result: Frag.ForRange = undefined;
+    var result: Frag = .{ .for_range = undefined };
     var parser = Parser{ .buf = input[4..] };
-    result.start = try std.fmt.parseInt(isize, trim(parser.untilStr("..")), 10);
+    result.for_range.start = try std.fmt.parseInt(isize, trim(parser.untilStr("..")), 10);
     parser.pos += 2;
-    result.end = try std.fmt.parseInt(isize, trim(parser.until(')')), 10);
+    result.for_range.end = try std.fmt.parseInt(isize, trim(parser.until(')')), 10);
     _ = parser.until('|');
     parser.pos += 1;
-    result.capture_name = trim(parser.until('|'));
+    result.for_range.capture_name = trim(parser.until('|'));
     return result;
 }
 
-fn parseForEach(comptime input: []const u8) !Frag.ForEach {
+fn parseForEach(comptime input: []const u8) !Frag {
     std.debug.assert(mem.startsWith(u8, input, "for("));
     var parser = Parser{ .buf = input[4..] };
-    var result: Frag.ForEach = undefined;
-    result.capture_index_name = null;
-    result.slice_name = trim(parser.until(')'));
+    var result: Frag = .{ .for_each = undefined };
+    result.for_each.capture_index_name = null;
+    result.for_each.slice_name = trim(parser.until(')'));
     _ = parser.until('|');
     parser.pos += 1;
-    result.capture_name = trim(parser.untilOneOf(",|"));
+    result.for_each.capture_name = trim(parser.untilOneOf(",|"));
     if (parser.peek(0)) |c| {
         if (c == ',') {
             parser.pos += 1;
-            result.capture_index_name = trim(parser.until('|'));
+            result.for_each.capture_index_name = trim(parser.until('|'));
         }
     }
     return result;
@@ -164,7 +165,7 @@ fn trim(s_: []const u8) []const u8 {
     return s;
 }
 
-inline fn tokenizeFragments(comptime fmt: []const u8) []const Frag {
+inline fn parseFragments(comptime fmt: []const u8) []const Frag {
     var fragments: []const Frag = &[0]Frag{};
     var parser = Parser{ .buf = fmt };
 
@@ -196,9 +197,9 @@ inline fn tokenizeFragments(comptime fmt: []const u8) []const Frag {
                             break :blk if (dotsidx < rparidx) .for_range else .for_each;
                         };
                         fragments = fragments ++ if (state == .for_range)
-                            [1]Frag{.{ .for_range = try parseForRange(escape(action)) }}
+                            [1]Frag{try parseForRange(escape(action))}
                         else
-                            [1]Frag{.{ .for_each = try parseForEach(escape(action)) }};
+                            [1]Frag{try parseForEach(escape(action))};
                     } else if (memeql(action, "end"))
                         fragments = fragments ++ [1]Frag{.end}
                     else
@@ -212,41 +213,70 @@ inline fn tokenizeFragments(comptime fmt: []const u8) []const Frag {
     }
     if (parser.marked_pos < parser.buf.len) {
         const lit = parser.buf[parser.marked_pos..];
-        fragments = fragments ++ [1]Frag{@unionInit(Frag, "literal", escape(lit))};
+        fragments = fragments ++ [1]Frag{.{ .literal = escape(lit) }};
     }
     return fragments;
 }
 
 /// recursively appends children of for_range and for_each loops to their bodies
 /// until end action reached
-inline fn nestFragments(comptime flat_frags: []const Frag) []const Frag {
-    comptime var result: []const Frag = &[0]Frag{};
-    var i: comptime_int = 0;
+const NestResult = struct { len: usize, children: []const Frag };
+fn nestFragments(comptime flat_frags: []const Frag) NestResult {
+    var result: []const Frag = &[0]Frag{};
+    var i: usize = 0;
     while (i < flat_frags.len) : (i += 1) {
         var frag = flat_frags[i];
         // append children until end
-        if (frag == .for_range or frag == .for_each) {
-            var frag_tag = &@field(frag, @tagName(frag));
-            i += 1;
-            frag_tag.body = nestFragments(flat_frags[i..]);
-            i += frag_tag.body.len;
+        switch (frag) {
+            .for_each, .for_range => {
+                i += 1;
+                const nresult = nestFragments(flat_frags[i..]);
+                var frag_tag = &@field(frag, @tagName(frag));
+                frag_tag.body = nresult.children;
+                if (nresult.len > 0)
+                    i += nresult.len;
+            },
+            .end => break,
+            else => {},
         }
-        if (frag == .end) break;
         result = result ++ &[1]Frag{frag};
     }
-    return result;
+    return .{ .len = i, .children = result };
+}
+
+fn visitTree(frags: []const Frag, ctx: anytype, cb: fn (Frag, @TypeOf(ctx)) void) void {
+    for (frags) |frag| {
+        switch (frag) {
+            .for_each => {
+                cb(frag, ctx);
+                visitTree(frag.for_each.body, ctx, cb);
+            },
+            .for_range => {
+                cb(frag, ctx);
+                visitTree(frag.for_range.body, ctx, cb);
+            },
+            else => cb(frag, ctx),
+        }
+    }
 }
 
 const Options = struct { eval_branch_quota: usize = 1000 };
 pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
     @setEvalBranchQuota(options.eval_branch_quota);
-    var tokens = tokenizeFragments(fmt);
+    var flat_frags = parseFragments(fmt);
+    // flat_frags is a flat list of fragments here.
+    // need to populate for_range.body and for_each.body with
+    // nested fragments.
+    const nest_result = nestFragments(flat_frags);
+    var nested = nest_result.children;
+    // append remaining non nested
+    if (nest_result.len < flat_frags.len) {
+        for (flat_frags[nest_result.len..]) |frag|
+            nested = nested ++ [1]Frag{frag};
+    }
 
     return struct {
-        // tokens is a flat list of fragments here.
-        // need to populate for_range.body and for_each.body with
-        // nested fragments.
-        pub const fragments = nestFragments(tokens);
+        pub const fragments = nested;
 
         pub fn bufPrint(buf: []u8, args: anytype) ![]u8 {
             var fbs = std.io.fixedBufferStream(buf);
@@ -385,7 +415,7 @@ test "string match" {
 
 test "end" {
     const text = "{{ end   }}";
-    const fragments = comptime tokenizeFragments(text);
+    const fragments = comptime parseFragments(text);
     std.testing.expectEqual(fragments.len, 1);
     std.testing.expect(fragments[0] == .end);
 }

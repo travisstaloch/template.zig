@@ -106,10 +106,10 @@ test "for range" {
     {
         const text =
             \\{{ for(0..2) |index| }}level1 {{index}}{{
-            \\      for(0..1) |index2|}} level2 {{index}}{{index2}}{{ end }} endlevel1 {{ end }}"
+            \\      for(0..1) |index2|}} level2 {{index}}{{index2}}{{ end }} endlevel1 {{ end }}
         ;
         const tmpl = Template(text, .{});
-        t_expectEqual(tmpl.fragments.len, 2);
+        t_expectEqual(tmpl.fragments.len, 1);
         t.expect(tmpl.fragments[0] == .for_range);
         t_expectEqual(tmpl.fragments[0].for_range.body.len, 4);
         expectFragment(tmpl.fragments[0].for_range.body[0], .literal, "level1 ");
@@ -127,28 +127,39 @@ test "for range" {
 }
 
 test "foreach" {
-    const text =
-        \\{{ for(list) |item, index| }}
-        \\Print {{item}} at {{index}}{{ end }}
-    ;
-    const tmpl = Template(text, .{ .eval_branch_quota = 4000 });
-    t_expectEqual(tmpl.fragments.len, 1);
-    t.expect(tmpl.fragments[0] == .for_each);
-    t.expectEqualStrings("list", tmpl.fragments[0].for_each.slice_name);
-    t.expectEqualStrings("item", tmpl.fragments[0].for_each.capture_name);
-    t.expectEqualStrings("index", tmpl.fragments[0].for_each.capture_index_name.?);
-    t_expectEqual(tmpl.fragments[0].for_each.body.len, 4);
-    expectFragment(tmpl.fragments[0].for_each.body[0], .literal, "\nPrint ");
-    expectFragment(tmpl.fragments[0].for_each.body[1], .action, "item");
-    expectFragment(tmpl.fragments[0].for_each.body[2], .literal, " at ");
-    expectFragment(tmpl.fragments[0].for_each.body[3], .action, "index");
-    try expectPrinted("\nPrint 84 at 0\nPrint 168 at 1", tmpl, .{ .list = &[_]u8{ 84, 168 } });
+    {
+        const text =
+            \\{{ for(list) |item, index| }}
+            \\Print {{item}} at {{index}}{{ end }}
+        ;
+        const tmpl = Template(text, .{ .eval_branch_quota = 4000 });
+        t_expectEqual(tmpl.fragments.len, 1);
+        t.expect(tmpl.fragments[0] == .for_each);
+        t.expectEqualStrings("list", tmpl.fragments[0].for_each.slice_name);
+        t.expectEqualStrings("item", tmpl.fragments[0].for_each.capture_name);
+        t.expectEqualStrings("index", tmpl.fragments[0].for_each.capture_index_name.?);
+        t_expectEqual(tmpl.fragments[0].for_each.body.len, 4);
+        expectFragment(tmpl.fragments[0].for_each.body[0], .literal, "\nPrint ");
+        expectFragment(tmpl.fragments[0].for_each.body[1], .action, "item");
+        expectFragment(tmpl.fragments[0].for_each.body[2], .literal, " at ");
+        expectFragment(tmpl.fragments[0].for_each.body[3], .action, "index");
+        const list = [_]u8{ 84, 168 };
+        try expectPrinted("\nPrint 84 at 0\nPrint 168 at 1", tmpl, .{ .list = list });
+    }
 }
 
 test "scopes" {
     const text = "{{for(0..1)|i|}}{{for(0..1)|i|}}{{end}}{{end}}";
     const tmpl = Template(text, .{ .eval_branch_quota = 2000 });
     t.expectError(error.DuplicateKey, tmpl.bufPrint(&print_buf, .{}));
+}
+
+test "mixed scope types" { // no for_each capture index
+    const text = "{{ for(0..1)|j| }}{{ for(list)|i| }}{{i}} - {{j}}, {{ end }}{{ end }}";
+    const tmpl = Template(text, .{ .eval_branch_quota = 2000 });
+    t_expectEqual(tmpl.fragments.len, 1);
+    const list = [_]u128{ 1, 2 };
+    try expectPrinted("1 - 0, 2 - 0, ", tmpl, .{ .list = list });
 }
 
 // --------------------
