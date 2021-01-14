@@ -162,6 +162,18 @@ test "mixed scope types" { // no for_each capture index
     try expectPrinted("1 - 0, 2 - 0, ", tmpl, .{ .list = list });
 }
 
+test "if" {
+    {
+        const text = "{{if cond}}a{{end}}";
+        const tmpl = Template(text, .{});
+        t.expect(tmpl.fragments[0] == .if_);
+        t.expectEqualStrings("cond", tmpl.fragments[0].if_.condition);
+        t_expectEqual(tmpl.fragments[0].if_.body.len, 1);
+        try expectPrinted("a", tmpl, .{ .cond = "asd" });
+        try expectPrinted("", tmpl, .{ .cond = "" });
+    }
+}
+
 // --------------------
 // --- readme tests ---
 // --------------------

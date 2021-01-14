@@ -1,14 +1,17 @@
 const std = @import("std");
 const mem = std.mem;
 
-pub const FragType = enum { literal, action, for_range, for_each, end };
-
+pub const FragType = enum { literal, action, for_range, for_each, end, if_ };
 pub const Frag = union(FragType) {
     literal: []const u8,
     action: []const u8,
     for_range: ForRange,
     for_each: ForEach,
     end,
+    if_: struct {
+        condition: []const u8,
+        body: []const Frag,
+    },
     pub const ForRange = struct {
         start: isize,
         end: isize,
@@ -36,6 +39,10 @@ pub const Frag = union(FragType) {
                 try writer.print("for({s}) |{s},{s}|", .{ value.for_each.slice_name, value.for_each.capture_name, value.for_each.capture_index_name });
                 // for (value.for_each.body) |child| try writer.print("  {}", .{child});
                 try writer.print("\n  {}", .{value.for_each.body});
+            },
+            .if_ => {
+                try writer.print("if {s}", .{value.if_.condition});
+                try writer.print("\n  {}", .{value.if_.body});
             },
             .end => unreachable,
         }
@@ -124,7 +131,7 @@ inline fn escape(comptime input: []const u8) []u8 {
     return output[0 .. input.len - (n1 + n2)];
 }
 
-fn parseForRange(comptime input: []const u8) !Frag {
+fn parseForRange(comptime input: []const u8) Frag {
     std.debug.assert(mem.startsWith(u8, input, "for("));
     var result: Frag = .{ .for_range = undefined };
     var parser = Parser{ .buf = input[4..] };
@@ -137,7 +144,7 @@ fn parseForRange(comptime input: []const u8) !Frag {
     return result;
 }
 
-fn parseForEach(comptime input: []const u8) !Frag {
+fn parseForEach(comptime input: []const u8) Frag {
     std.debug.assert(mem.startsWith(u8, input, "for("));
     var parser = Parser{ .buf = input[4..] };
     var result: Frag = .{ .for_each = undefined };
@@ -152,6 +159,13 @@ fn parseForEach(comptime input: []const u8) !Frag {
             result.for_each.capture_index_name = trim(parser.until('|'));
         }
     }
+    return result;
+}
+
+fn parseIf(comptime input: []const u8) Frag {
+    std.debug.assert(mem.startsWith(u8, input, "if"));
+    var result: Frag = .{ .if_ = undefined };
+    result.if_.condition = trim(input[2..]);
     return result;
 }
 
@@ -197,10 +211,12 @@ inline fn parseFragments(comptime fmt: []const u8) []const Frag {
                             break :blk if (dotsidx < rparidx) .for_range else .for_each;
                         };
                         fragments = fragments ++ if (state == .for_range)
-                            [1]Frag{try parseForRange(escape(action))}
+                            [1]Frag{parseForRange(escape(action))}
                         else
-                            [1]Frag{try parseForEach(escape(action))};
-                    } else if (memeql(action, "end"))
+                            [1]Frag{parseForEach(escape(action))};
+                    } else if (mem.startsWith(u8, action, "if"))
+                        fragments = fragments ++ [1]Frag{parseIf(escape(action))}
+                    else if (memeql(action, "end"))
                         fragments = fragments ++ [1]Frag{.end}
                     else
                         fragments = fragments ++ [1]Frag{.{ .action = escape(action) }};
@@ -228,7 +244,7 @@ fn nestFragments(comptime flat_frags: []const Frag) NestResult {
         var frag = flat_frags[i];
         // append children until end
         switch (frag) {
-            .for_each, .for_range => {
+            .for_each, .for_range, .if_ => {
                 i += 1;
                 const nresult = nestFragments(flat_frags[i..]);
                 var frag_tag = &@field(frag, @tagName(frag));
@@ -247,20 +263,16 @@ fn nestFragments(comptime flat_frags: []const Frag) NestResult {
 fn visitTree(frags: []const Frag, ctx: anytype, cb: fn (Frag, @TypeOf(ctx)) void) void {
     for (frags) |frag| {
         switch (frag) {
-            .for_each => {
+            .for_each, .for_range, .if_ => {
                 cb(frag, ctx);
-                visitTree(frag.for_each.body, ctx, cb);
-            },
-            .for_range => {
-                cb(frag, ctx);
-                visitTree(frag.for_range.body, ctx, cb);
+                visitTree(@field(frag, @tagName(frag)).body, ctx, cb);
             },
             else => cb(frag, ctx),
         }
     }
 }
 
-const Options = struct { eval_branch_quota: usize = 1000 };
+const Options = struct { eval_branch_quota: usize = 1050 };
 pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
     @setEvalBranchQuota(options.eval_branch_quota);
     var flat_frags = parseFragments(fmt);
@@ -334,6 +346,11 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
                                 );
                         }
                     },
+                    .if_ => {
+                        const cond = @field(args, frag.if_.condition);
+                        if (cond.len > 0)
+                            try bufPrintImpl(scopes, frag.if_.body, writer, args);
+                    },
                     .end => unreachable,
                 }
             }
@@ -355,7 +372,6 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
     };
 }
 
-// TODO: use this in place of mem.eql
 fn StrHasher(comptime min_bytes: usize) type {
     return struct {
         const byte_len = std.math.ceilPowerOfTwo(usize, min_bytes) catch |e| @compileError("invalid min_bytes: " ++ @errorName(e));
