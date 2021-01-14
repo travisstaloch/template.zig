@@ -1,17 +1,15 @@
 const std = @import("std");
 const mem = std.mem;
 
-pub const FragType = enum { literal, action, for_range, for_each, end, if_ };
+// TODO: wrap in node type with fields next and frag?
+// think more about how pipelines work
+pub const FragType = enum { literal, action, for_range, for_each, end };
 pub const Frag = union(FragType) {
     literal: []const u8,
     action: []const u8,
     for_range: ForRange,
     for_each: ForEach,
     end,
-    if_: struct {
-        condition: []const u8,
-        body: []const Frag,
-    },
     pub const ForRange = struct {
         start: isize,
         end: isize,
@@ -39,10 +37,6 @@ pub const Frag = union(FragType) {
                 try writer.print("for({s}) |{s},{s}|", .{ value.for_each.slice_name, value.for_each.capture_name, value.for_each.capture_index_name });
                 // for (value.for_each.body) |child| try writer.print("  {}", .{child});
                 try writer.print("\n  {}", .{value.for_each.body});
-            },
-            .if_ => {
-                try writer.print("if {s}", .{value.if_.condition});
-                try writer.print("\n  {}", .{value.if_.body});
             },
             .end => unreachable,
         }
@@ -162,13 +156,6 @@ fn parseForEach(comptime input: []const u8) Frag {
     return result;
 }
 
-fn parseIf(comptime input: []const u8) Frag {
-    std.debug.assert(mem.startsWith(u8, input, "if"));
-    var result: Frag = .{ .if_ = undefined };
-    result.if_.condition = trim(input[2..]);
-    return result;
-}
-
 /// trim trailing and leading whitespace
 fn trim(s_: []const u8) []const u8 {
     var s = s_;
@@ -214,9 +201,7 @@ inline fn parseFragments(comptime fmt: []const u8) []const Frag {
                             [1]Frag{parseForRange(escape(action))}
                         else
                             [1]Frag{parseForEach(escape(action))};
-                    } else if (mem.startsWith(u8, action, "if"))
-                        fragments = fragments ++ [1]Frag{parseIf(escape(action))}
-                    else if (memeql(action, "end"))
+                    } else if (memeql(action, "end"))
                         fragments = fragments ++ [1]Frag{.end}
                     else
                         fragments = fragments ++ [1]Frag{.{ .action = escape(action) }};
@@ -244,7 +229,9 @@ fn nestFragments(comptime flat_frags: []const Frag) NestResult {
         var frag = flat_frags[i];
         // append children until end
         switch (frag) {
-            .for_each, .for_range, .if_ => {
+            .for_each,
+            .for_range,
+            => {
                 i += 1;
                 const nresult = nestFragments(flat_frags[i..]);
                 var frag_tag = &@field(frag, @tagName(frag));
@@ -263,7 +250,7 @@ fn nestFragments(comptime flat_frags: []const Frag) NestResult {
 fn visitTree(frags: []const Frag, ctx: anytype, cb: fn (Frag, @TypeOf(ctx)) void) void {
     for (frags) |frag| {
         switch (frag) {
-            .for_each, .for_range, .if_ => {
+            .for_each, .for_range => {
                 cb(frag, ctx);
                 visitTree(@field(frag, @tagName(frag)).body, ctx, cb);
             },
@@ -272,9 +259,13 @@ fn visitTree(frags: []const Frag, ctx: anytype, cb: fn (Frag, @TypeOf(ctx)) void
     }
 }
 
-const Options = struct { eval_branch_quota: usize = 1050 };
-pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
-    @setEvalBranchQuota(options.eval_branch_quota);
+// pub const Duck = struct { value: anytype };
+const Options = struct {
+    eval_branch_quota: usize = 1050,
+    name: ?[]const u8 = null,
+};
+pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
+    @setEvalBranchQuota(options_.eval_branch_quota);
     var flat_frags = parseFragments(fmt);
     // flat_frags is a flat list of fragments here.
     // need to populate for_range.body and for_each.body with
@@ -288,6 +279,7 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
     }
 
     return struct {
+        pub const options = options_;
         pub const fragments = nested;
 
         pub fn bufPrint(buf: []u8, args: anytype) ![]u8 {
@@ -348,16 +340,16 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
                                 );
                         }
                     },
-                    .if_ => {
-                        const condition = @field(args, frag.if_.condition);
-                        if (!try empty(condition))
-                            try bufPrintImpl(scopes, frag.if_.body, writer, args)
-                        else if (i + 1 < frags.len and frags[i + 1] == .else_) {
-                            try bufPrintImpl(scopes, frag.if_.body, writer, args);
-                            i += 1;
-                        }
-                    },
-                    .end, .else_ => unreachable,
+                    // .if_ => {
+                    //     const condition = @field(args, frag.if_.condition);
+                    //     if (!try empty(condition))
+                    //         try bufPrintImpl(scopes, frag.if_.body, writer, args)
+                    //     else if (i + 1 < frags.len and frags[i + 1] == .else_) {
+                    //         try bufPrintImpl(scopes, frag.if_.body, writer, args);
+                    //         i += 1;
+                    //     }
+                    // },
+                    .end => unreachable,
                 }
             }
         }

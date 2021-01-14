@@ -162,27 +162,27 @@ test "mixed scope types" { // no for_each capture index
     try expectPrinted("1 - 0, 2 - 0, ", tmpl, .{ .list = list });
 }
 
-test "if" {
-    {
-        const text = "{{if cond}}a{{end}}";
-        const tmpl = Template(text, .{});
-        t.expect(tmpl.fragments[0] == .if_);
-        t.expectEqualStrings("cond", tmpl.fragments[0].if_.condition);
-        t_expectEqual(tmpl.fragments[0].if_.body.len, 1);
-        try expectPrinted("a", tmpl, .{ .cond = "asd" });
-        try expectPrinted("", tmpl, .{ .cond = "" });
-    }
-    {
-        const text = "{{if cond}}a{{else}}b{{end}}";
-        const tmpl = Template(text, .{});
-        t.expect(tmpl.fragments[0] == .if_);
-        t.expectEqualStrings("cond", tmpl.fragments[0].if_.condition);
-        t_expectEqual(tmpl.fragments[0].if_.body.len, 3);
-        t.expect(tmpl.fragments[0].if_.body[1] == .else_);
-        try expectPrinted("a", tmpl, .{ .cond = "asd" });
-        try expectPrinted("b", tmpl, .{ .cond = "" });
-    }
-}
+// test "if" {
+//     {
+//         const text = "{{if cond}}a{{end}}";
+//         const tmpl = Template(text, .{});
+//         t.expect(tmpl.fragments[0] == .if_);
+//         t.expectEqualStrings("cond", tmpl.fragments[0].if_.condition);
+//         t_expectEqual(tmpl.fragments[0].if_.body.len, 1);
+//         try expectPrinted("a", tmpl, .{ .cond = "asd" });
+//         try expectPrinted("", tmpl, .{ .cond = "" });
+//     }
+//     {
+//         const text = "{{if cond}}a{{else}}b{{end}}";
+//         const tmpl = Template(text, .{});
+//         t.expect(tmpl.fragments[0] == .if_);
+//         t.expectEqualStrings("cond", tmpl.fragments[0].if_.condition);
+//         t_expectEqual(tmpl.fragments[0].if_.body.len, 3);
+//         t.expect(tmpl.fragments[0].if_.body[1] == .else_);
+//         try expectPrinted("a", tmpl, .{ .cond = "asd" });
+//         try expectPrinted("b", tmpl, .{ .cond = "" });
+//     }
+// }
 
 test "multiple templates" {
     const template = @import("template.zig");
