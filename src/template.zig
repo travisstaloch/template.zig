@@ -299,7 +299,9 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
 
         pub const BufPrintError = error{DuplicateKey} || std.io.FixedBufferStream([]u8).WriteError;
         fn bufPrintImpl(comptime scopes: []const []const ScopeEntry, comptime frags: []const Frag, writer: anytype, args: anytype) BufPrintError!void {
-            inline for (frags) |frag, i| {
+            comptime var i: comptime_int = 0;
+            inline while (i < frags.len) : (i += 1) {
+                const frag = frags[i];
                 switch (frag) {
                     .literal => _ = try writer.write(frag.literal),
                     .action => {
@@ -347,14 +349,38 @@ pub fn Template(comptime fmt: []const u8, comptime options: Options) type {
                         }
                     },
                     .if_ => {
-                        const cond = @field(args, frag.if_.condition);
-                        if (cond.len > 0)
+                        const condition = @field(args, frag.if_.condition);
+                        if (!try empty(condition))
+                            try bufPrintImpl(scopes, frag.if_.body, writer, args)
+                        else if (i + 1 < frags.len and frags[i + 1] == .else_) {
                             try bufPrintImpl(scopes, frag.if_.body, writer, args);
+                            i += 1;
+                        }
                     },
-                    .end => unreachable,
+                    .end, .else_ => unreachable,
                 }
             }
         }
+
+        fn empty(value: anytype) !bool {
+            const V = @TypeOf(value);
+            const vti = @typeInfo(V);
+            return switch (vti) {
+                .Pointer => switch (vti.Pointer.size) {
+                    .One => empty(value.*),
+                    .Slice => value.len == 0,
+                    else => error.UnsupportedType,
+                },
+                .Optional => value == null,
+                .Bool => value,
+                .Array, .Vector => value.len == 0,
+                else => if (@hasField(V, "len") or @hasDecl(V, "len"))
+                    value.len == 0
+                else
+                    error.UnsupportedType,
+            };
+        }
+
         const ScopeEntry = struct { key: []const u8, value: anytype };
 
         pub fn allocPrint(allocator: *mem.Allocator, args: anytype) ![]u8 {

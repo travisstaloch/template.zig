@@ -172,6 +172,26 @@ test "if" {
         try expectPrinted("a", tmpl, .{ .cond = "asd" });
         try expectPrinted("", tmpl, .{ .cond = "" });
     }
+    {
+        const text = "{{if cond}}a{{else}}b{{end}}";
+        const tmpl = Template(text, .{});
+        t.expect(tmpl.fragments[0] == .if_);
+        t.expectEqualStrings("cond", tmpl.fragments[0].if_.condition);
+        t_expectEqual(tmpl.fragments[0].if_.body.len, 3);
+        t.expect(tmpl.fragments[0].if_.body[1] == .else_);
+        try expectPrinted("a", tmpl, .{ .cond = "asd" });
+        try expectPrinted("b", tmpl, .{ .cond = "" });
+    }
+}
+
+test "multiple templates" {
+    const template = @import("template.zig");
+    const T1 = Template("T1", .{ .name = "T1" });
+    const T2 = Template("T2", .{ .name = "T2" });
+    t.expectEqualStrings("T1", T1.options.name.?);
+    t.expectEqualStrings("T2", T2.options.name.?);
+    try expectPrinted("T1", T1, .{});
+    try expectPrinted("T2", T2, .{});
 }
 
 // --------------------
