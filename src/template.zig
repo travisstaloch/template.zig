@@ -1,11 +1,12 @@
 const std = @import("std");
 const mem = std.mem;
 
-// TODO: wrap in node type with fields next and frag?
+// TODO: wrap in node type with fields next and node?
 // think more about how pipelines work
-pub const FragType = enum { literal, action, for_range, for_each, end };
-pub const Frag = union(FragType) {
-    literal: []const u8,
+
+pub const NodeType = enum { text, action, for_range, for_each, end };
+pub const Node = union(NodeType) {
+    text: []const u8,
     action: []const u8,
     for_range: ForRange,
     for_each: ForEach,
@@ -14,19 +15,19 @@ pub const Frag = union(FragType) {
         start: isize,
         end: isize,
         capture_name: []const u8,
-        body: []const Frag,
+        body: []const Node,
     };
     pub const ForEach = struct {
         slice_name: []const u8,
         capture_name: []const u8,
         capture_index_name: ?[]const u8,
-        body: []const Frag,
+        body: []const Node,
     };
 
     const FormatError = error{ DiskQuota, FileTooBig, InputOutput, NoSpaceLeft, AccessDenied, BrokenPipe, SystemResources, OperationAborted, NotOpenForWriting, WouldBlock, Unexpected };
-    pub fn format(value: Frag, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) FormatError!void {
+    pub fn format(value: Node, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) FormatError!void {
         switch (value) {
-            .literal => try writer.print("'{s}'", .{value.literal}),
+            .text => try writer.print("'{s}'", .{value.text}),
             .action => try writer.print("'{{{{{s}}}}}'", .{value.action}),
             .for_range => {
                 try writer.print("for({}..{}) |{s}|", .{ value.for_range.start, value.for_range.end, value.for_range.capture_name });
@@ -125,9 +126,9 @@ inline fn escape(comptime input: []const u8) []u8 {
     return output[0 .. input.len - (n1 + n2)];
 }
 
-fn parseForRange(comptime input: []const u8) Frag {
+fn parseForRange(comptime input: []const u8) Node {
     std.debug.assert(mem.startsWith(u8, input, "for("));
-    var result: Frag = .{ .for_range = undefined };
+    var result: Node = .{ .for_range = undefined };
     var parser = Parser{ .buf = input[4..] };
     result.for_range.start = try std.fmt.parseInt(isize, trim(parser.untilStr("..")), 10);
     parser.pos += 2;
@@ -138,10 +139,10 @@ fn parseForRange(comptime input: []const u8) Frag {
     return result;
 }
 
-fn parseForEach(comptime input: []const u8) Frag {
+fn parseForEach(comptime input: []const u8) Node {
     std.debug.assert(mem.startsWith(u8, input, "for("));
     var parser = Parser{ .buf = input[4..] };
-    var result: Frag = .{ .for_each = undefined };
+    var result: Node = .{ .for_each = undefined };
     result.for_each.capture_index_name = null;
     result.for_each.slice_name = trim(parser.until(')'));
     _ = parser.until('|');
@@ -166,8 +167,8 @@ fn trim(s_: []const u8) []const u8 {
     return s;
 }
 
-inline fn parseFragments(comptime fmt: []const u8) []const Frag {
-    var fragments: []const Frag = &[0]Frag{};
+inline fn parseNodes(comptime fmt: []const u8) []const Node {
+    var nodes: []const Node = &[0]Node{};
     var parser = Parser{ .buf = fmt };
 
     while (!parser.eos()) : (parser.pos += 1) {
@@ -179,14 +180,14 @@ inline fn parseFragments(comptime fmt: []const u8) []const Frag {
                 const lit = parser.fromMark();
 
                 if (lit.len != 0)
-                    fragments = fragments ++ [1]Frag{@unionInit(Frag, "literal", escape(lit))};
+                    nodes = nodes ++ [1]Node{@unionInit(Node, "text", escape(lit))};
                 parser.mark(2);
                 parser.pos += 1;
             },
             '}' => {
                 const next = parser.peek(1) orelse break;
                 if (next != c) continue;
-                var state: FragType = .action;
+                var state: NodeType = .action;
                 var action = parser.fromMark();
                 if (action.len != 0) {
                     action = trim(action);
@@ -197,14 +198,14 @@ inline fn parseFragments(comptime fmt: []const u8) []const Frag {
                             const rparidx = mem.indexOf(u8, action, ")") orelse return error.MissingRightParen;
                             break :blk if (dotsidx < rparidx) .for_range else .for_each;
                         };
-                        fragments = fragments ++ if (state == .for_range)
-                            [1]Frag{parseForRange(escape(action))}
+                        nodes = nodes ++ if (state == .for_range)
+                            [1]Node{parseForRange(escape(action))}
                         else
-                            [1]Frag{parseForEach(escape(action))};
+                            [1]Node{parseForEach(escape(action))};
                     } else if (memeql(action, "end"))
-                        fragments = fragments ++ [1]Frag{.end}
+                        nodes = nodes ++ [1]Node{.end}
                     else
-                        fragments = fragments ++ [1]Frag{.{ .action = escape(action) }};
+                        nodes = nodes ++ [1]Node{.{ .action = escape(action) }};
                 }
                 parser.mark(2);
                 parser.pos += 1;
@@ -214,47 +215,47 @@ inline fn parseFragments(comptime fmt: []const u8) []const Frag {
     }
     if (parser.marked_pos < parser.buf.len) {
         const lit = parser.buf[parser.marked_pos..];
-        fragments = fragments ++ [1]Frag{.{ .literal = escape(lit) }};
+        nodes = nodes ++ [1]Node{.{ .text = escape(lit) }};
     }
-    return fragments;
+    return nodes;
 }
 
 /// recursively appends children of for_range and for_each loops to their bodies
 /// until end action reached
-const NestResult = struct { len: usize, children: []const Frag };
-fn nestFragments(comptime flat_frags: []const Frag) NestResult {
-    var result: []const Frag = &[0]Frag{};
+const Tree = struct { len: usize, root: []const Node };
+fn parseTree(comptime flat_nodes: []const Node) Tree {
+    var result: []const Node = &[0]Node{};
     var i: usize = 0;
-    while (i < flat_frags.len) : (i += 1) {
-        var frag = flat_frags[i];
+    while (i < flat_nodes.len) : (i += 1) {
+        var node = flat_nodes[i];
         // append children until end
-        switch (frag) {
+        switch (node) {
             .for_each,
             .for_range,
             => {
                 i += 1;
-                const nresult = nestFragments(flat_frags[i..]);
-                var frag_tag = &@field(frag, @tagName(frag));
-                frag_tag.body = nresult.children;
+                const nresult = parseTree(flat_nodes[i..]);
+                var node_tag = &@field(node, @tagName(node));
+                node_tag.body = nresult.root;
                 if (nresult.len > 0)
                     i += nresult.len;
             },
             .end => break,
             else => {},
         }
-        result = result ++ &[1]Frag{frag};
+        result = result ++ &[1]Node{node};
     }
-    return .{ .len = i, .children = result };
+    return .{ .len = i, .root = result };
 }
 
-fn visitTree(frags: []const Frag, ctx: anytype, cb: fn (Frag, @TypeOf(ctx)) void) void {
-    for (frags) |frag| {
-        switch (frag) {
+fn visitNodes(nodes: []const Node, ctx: anytype, cb: fn (Node, @TypeOf(ctx)) void) void {
+    for (nodes) |node| {
+        switch (node) {
             .for_each, .for_range => {
-                cb(frag, ctx);
-                visitTree(@field(frag, @tagName(frag)).body, ctx, cb);
+                cb(node, ctx);
+                visitTree(@field(node, @tagName(node)).body, ctx, cb);
             },
-            else => cb(frag, ctx),
+            else => cb(node, ctx),
         }
     }
 }
@@ -266,44 +267,46 @@ const Options = struct {
 };
 pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
     @setEvalBranchQuota(options_.eval_branch_quota);
-    var flat_frags = parseFragments(fmt);
-    // flat_frags is a flat list of fragments here.
+    var flat_nodes = parseNodes(fmt);
+    // flat_nodes is a flat list of nodes here.
     // need to populate for_range.body and for_each.body with
-    // nested fragments.
-    const nest_result = nestFragments(flat_frags);
-    var nested = nest_result.children;
-    // append remaining non nested
-    if (nest_result.len < flat_frags.len) {
-        for (flat_frags[nest_result.len..]) |frag|
-            nested = nested ++ [1]Frag{frag};
+    // nested nodes.
+    var tree_ = parseTree(flat_nodes);
+    var root = tree_.root;
+    // append remaining non root
+    if (tree_.len < flat_nodes.len) {
+        for (flat_nodes[tree_.len..]) |node|
+            root = root ++ [1]Node{node};
+        tree_.len = flat_nodes.len;
     }
+    tree_.root = root;
 
     return struct {
         pub const options = options_;
-        pub const fragments = nested;
+        pub const tree = tree_;
 
         pub fn bufPrint(buf: []u8, args: anytype) ![]u8 {
             var fbs = std.io.fixedBufferStream(buf);
             comptime var scopes: []const []const ScopeEntry = &[_][]const ScopeEntry{};
-            try bufPrintImpl(scopes, fragments, fbs.writer(), args);
+            try bufPrintImpl(scopes, tree.root, fbs.writer(), args);
             return fbs.getWritten();
         }
 
         pub const BufPrintError = error{DuplicateKey} || std.io.FixedBufferStream([]u8).WriteError;
-        fn bufPrintImpl(comptime scopes: []const []const ScopeEntry, comptime frags: []const Frag, writer: anytype, args: anytype) BufPrintError!void {
+        fn bufPrintImpl(comptime scopes: []const []const ScopeEntry, comptime nodes: []const Node, writer: anytype, args: anytype) BufPrintError!void {
             comptime var i: comptime_int = 0;
-            inline while (i < frags.len) : (i += 1) {
-                const frag = frags[i];
-                switch (frag) {
-                    .literal => _ = try writer.write(frag.literal),
+            inline while (i < nodes.len) : (i += 1) {
+                const node = nodes[i];
+                switch (node) {
+                    .text => _ = try writer.write(node.text),
                     .action => {
-                        if (@hasField(@TypeOf(args), frag.action)) {
-                            _ = try writer.write(@field(args, frag.action));
+                        if (@hasField(@TypeOf(args), node.action)) {
+                            _ = try writer.write(@field(args, node.action));
                         } else {
                             // search scopes
                             inline for (scopes) |scope| {
                                 inline for (scope) |entry| {
-                                    if (memeql(entry.key, frag.action)) {
+                                    if (memeql(entry.key, node.action)) {
                                         _ = try writer.print("{}", .{entry.value});
                                     }
                                 }
@@ -311,41 +314,41 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
                         }
                     },
                     .for_range => {
-                        comptime var j = frag.for_range.start;
-                        inline while (j < frag.for_range.end) : (j += 1) {
+                        comptime var j = node.for_range.start;
+                        inline while (j < node.for_range.end) : (j += 1) {
                             try bufPrintImpl(
-                                try appendScope(scopes, frag.for_range.capture_name, j),
-                                frag.for_range.body,
+                                try appendScope(scopes, node.for_range.capture_name, j),
+                                node.for_range.body,
                                 writer,
                                 args,
                             );
                         }
                     },
                     .for_each => {
-                        const slice = @field(args, frag.for_each.slice_name);
+                        const slice = @field(args, node.for_each.slice_name);
                         inline for (slice) |item, index| {
-                            if (frag.for_each.capture_index_name) |idx_name|
+                            if (node.for_each.capture_index_name) |idx_name|
                                 try bufPrintImpl(
-                                    try appendScope(try appendScope(scopes, frag.for_each.capture_name, item), idx_name, index),
-                                    frag.for_each.body,
+                                    try appendScope(try appendScope(scopes, node.for_each.capture_name, item), idx_name, index),
+                                    node.for_each.body,
                                     writer,
                                     args,
                                 )
                             else
                                 try bufPrintImpl(
-                                    try appendScope(scopes, frag.for_each.capture_name, item),
-                                    frag.for_each.body,
+                                    try appendScope(scopes, node.for_each.capture_name, item),
+                                    node.for_each.body,
                                     writer,
                                     args,
                                 );
                         }
                     },
                     // .if_ => {
-                    //     const condition = @field(args, frag.if_.condition);
+                    //     const condition = @field(args, node.if_.condition);
                     //     if (!try empty(condition))
-                    //         try bufPrintImpl(scopes, frag.if_.body, writer, args)
-                    //     else if (i + 1 < frags.len and frags[i + 1] == .else_) {
-                    //         try bufPrintImpl(scopes, frag.if_.body, writer, args);
+                    //         try bufPrintImpl(scopes, node.if_.body, writer, args)
+                    //     else if (i + 1 < nodes.len and nodes[i + 1] == .else_) {
+                    //         try bufPrintImpl(scopes, node.if_.body, writer, args);
                     //         i += 1;
                     //     }
                     // },
@@ -378,7 +381,7 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
         pub fn allocPrint(allocator: *mem.Allocator, args: anytype) ![]u8 {
             var writer = std.io.countingWriter(std.io.null_writer);
             comptime var scopes: []const []const ScopeEntry = &[_][]const ScopeEntry{};
-            try bufPrintImpl(scopes, fragments, writer.writer(), args);
+            try bufPrintImpl(scopes, tree.root, writer.writer(), args);
             const buf = try allocator.alloc(u8, writer.bytes_written);
             return try bufPrint(buf, args);
         }
@@ -449,7 +452,7 @@ test "string match" {
 
 test "end" {
     const text = "{{ end   }}";
-    const fragments = comptime parseFragments(text);
-    std.testing.expectEqual(fragments.len, 1);
-    std.testing.expect(fragments[0] == .end);
+    const tree = comptime parseNodes(text);
+    std.testing.expectEqual(tree.len, 1);
+    std.testing.expect(tree[0] == .end);
 }

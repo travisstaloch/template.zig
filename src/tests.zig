@@ -12,9 +12,9 @@ fn t_expectEqual(actual: anytype, expected: @TypeOf(actual)) void {
     t.expectEqual(expected, actual);
 }
 
-fn expectFragment(frag: Frag, comptime frag_type: FragType, expected_text: comptime []const u8) void {
-    t.expect(frag == frag_type);
-    t.expectEqualStrings(expected_text, @field(frag, @tagName(frag_type)));
+fn expectNode(node: Node, comptime node_type: NodeType, expected_text: comptime []const u8) void {
+    t.expect(node == node_type);
+    t.expectEqualStrings(expected_text, @field(node, @tagName(node_type)));
 }
 
 fn expectPrinted(expected: []const u8, tmpl: anytype, args: anytype) !void {
@@ -34,35 +34,35 @@ test "parser" {
     t.expectEqualStrings("ccdd", p.untilStr("{{"));
 }
 
-test "literal" {
+test "text" {
     {
         const text = "";
         const tmpl = Template(text, .{});
-        t_expectEqual(tmpl.fragments.len, 0);
+        t_expectEqual(tmpl.tree.root.len, 0);
         t.expectEqualStrings(text, try tmpl.bufPrint(&print_buf, .{}));
         try expectPrinted(text, tmpl, .{});
     }
     {
         const text = "hello";
         const tmpl = Template(text, .{});
-        t_expectEqual(tmpl.fragments.len, 1);
-        expectFragment(tmpl.fragments[0], .literal, text);
+        t_expectEqual(tmpl.tree.root.len, 1);
+        expectNode(tmpl.tree.root[0], .text, text);
         t.expectEqualStrings(text, try tmpl.bufPrint(&print_buf, .{}));
         try expectPrinted(text, tmpl, .{});
     }
     {
         const text = "}{hello{}";
         const tmpl = Template(text, .{});
-        t_expectEqual(tmpl.fragments.len, 1);
-        expectFragment(tmpl.fragments[0], .literal, text);
+        t_expectEqual(tmpl.tree.root.len, 1);
+        expectNode(tmpl.tree.root[0], .text, text);
         try expectPrinted(text, tmpl, .{});
     }
 }
 
 test "escapes" {
     const tmpl = Template("\\{\\{0\\}\\}", .{});
-    t_expectEqual(tmpl.fragments.len, 1);
-    expectFragment(tmpl.fragments[0], .literal, "{{0}}");
+    t_expectEqual(tmpl.tree.root.len, 1);
+    expectNode(tmpl.tree.root[0], .text, "{{0}}");
     try expectPrinted("{{0}}", tmpl, .{"zug"});
 }
 
@@ -70,18 +70,18 @@ test "variables" {
     {
         const text = "{{name}}";
         const tmpl = Template(text, .{});
-        t_expectEqual(tmpl.fragments.len, 1);
-        expectFragment(tmpl.fragments[0], .action, "name");
+        t_expectEqual(tmpl.tree.root.len, 1);
+        expectNode(tmpl.tree.root[0], .action, "name");
         try expectPrinted("zero", tmpl, .{ .name = "zero" });
     }
     {
         const text = "Hi {{name}} at index #{{index}}";
         const tmpl = Template(text, .{});
-        t_expectEqual(tmpl.fragments.len, 4);
-        expectFragment(tmpl.fragments[0], .literal, "Hi ");
-        expectFragment(tmpl.fragments[1], .action, "name");
-        expectFragment(tmpl.fragments[2], .literal, " at index #");
-        expectFragment(tmpl.fragments[3], .action, "index");
+        t_expectEqual(tmpl.tree.root.len, 4);
+        expectNode(tmpl.tree.root[0], .text, "Hi ");
+        expectNode(tmpl.tree.root[1], .action, "name");
+        expectNode(tmpl.tree.root[2], .text, " at index #");
+        expectNode(tmpl.tree.root[3], .action, "index");
         try expectPrinted("Hi zero at index #000", tmpl, .{ .name = "zero", .index = "000" });
     }
 }
@@ -90,17 +90,17 @@ test "for range" {
     {
         const text = "{{ for(0..2) |index| }} a {{index}} b {{ end }} c";
         const tmpl = Template(text, .{ .eval_branch_quota = 8000 });
-        t_expectEqual(tmpl.fragments.len, 2);
-        t.expect(tmpl.fragments[0] == .for_range);
-        t_expectEqual(tmpl.fragments[0].for_range.start, 0);
-        t_expectEqual(tmpl.fragments[0].for_range.end, 2);
-        t.expectEqualStrings("index", tmpl.fragments[0].for_range.capture_name);
-        t_expectEqual(tmpl.fragments[0].for_range.body.len, 3);
-        expectFragment(tmpl.fragments[0].for_range.body[0], .literal, " a ");
-        expectFragment(tmpl.fragments[0].for_range.body[1], .action, "index");
-        expectFragment(tmpl.fragments[0].for_range.body[2], .literal, " b ");
-        t.expect(tmpl.fragments[1] == .literal);
-        t.expectEqualStrings(" c", tmpl.fragments[1].literal);
+        t_expectEqual(tmpl.tree.root.len, 2);
+        t.expect(tmpl.tree.root[0] == .for_range);
+        t_expectEqual(tmpl.tree.root[0].for_range.start, 0);
+        t_expectEqual(tmpl.tree.root[0].for_range.end, 2);
+        t.expectEqualStrings("index", tmpl.tree.root[0].for_range.capture_name);
+        t_expectEqual(tmpl.tree.root[0].for_range.body.len, 3);
+        expectNode(tmpl.tree.root[0].for_range.body[0], .text, " a ");
+        expectNode(tmpl.tree.root[0].for_range.body[1], .action, "index");
+        expectNode(tmpl.tree.root[0].for_range.body[2], .text, " b ");
+        t.expect(tmpl.tree.root[1] == .text);
+        t.expectEqualStrings(" c", tmpl.tree.root[1].text);
         try expectPrinted(" a 0 b  a 1 b  c", tmpl, .{});
     }
     {
@@ -109,19 +109,19 @@ test "for range" {
             \\      for(0..1) |index2|}} level2 {{index}}{{index2}}{{ end }} endlevel1 {{ end }}
         ;
         const tmpl = Template(text, .{});
-        t_expectEqual(tmpl.fragments.len, 1);
-        t.expect(tmpl.fragments[0] == .for_range);
-        t_expectEqual(tmpl.fragments[0].for_range.body.len, 4);
-        expectFragment(tmpl.fragments[0].for_range.body[0], .literal, "level1 ");
-        expectFragment(tmpl.fragments[0].for_range.body[1], .action, "index");
-        t.expect(tmpl.fragments[0].for_range.body[2] == .for_range);
-        t.expectEqualStrings("index2", tmpl.fragments[0].for_range.body[2].for_range.capture_name);
-        expectFragment(tmpl.fragments[0].for_range.body[1], .action, "index");
-        t_expectEqual(tmpl.fragments[0].for_range.body[2].for_range.body.len, 3);
-        expectFragment(tmpl.fragments[0].for_range.body[2].for_range.body[0], .literal, " level2 ");
-        expectFragment(tmpl.fragments[0].for_range.body[2].for_range.body[1], .action, "index");
-        expectFragment(tmpl.fragments[0].for_range.body[2].for_range.body[2], .action, "index2");
-        expectFragment(tmpl.fragments[0].for_range.body[3], .literal, " endlevel1 ");
+        t_expectEqual(tmpl.tree.root.len, 1);
+        t.expect(tmpl.tree.root[0] == .for_range);
+        t_expectEqual(tmpl.tree.root[0].for_range.body.len, 4);
+        expectNode(tmpl.tree.root[0].for_range.body[0], .text, "level1 ");
+        expectNode(tmpl.tree.root[0].for_range.body[1], .action, "index");
+        t.expect(tmpl.tree.root[0].for_range.body[2] == .for_range);
+        t.expectEqualStrings("index2", tmpl.tree.root[0].for_range.body[2].for_range.capture_name);
+        expectNode(tmpl.tree.root[0].for_range.body[1], .action, "index");
+        t_expectEqual(tmpl.tree.root[0].for_range.body[2].for_range.body.len, 3);
+        expectNode(tmpl.tree.root[0].for_range.body[2].for_range.body[0], .text, " level2 ");
+        expectNode(tmpl.tree.root[0].for_range.body[2].for_range.body[1], .action, "index");
+        expectNode(tmpl.tree.root[0].for_range.body[2].for_range.body[2], .action, "index2");
+        expectNode(tmpl.tree.root[0].for_range.body[3], .text, " endlevel1 ");
         try expectPrinted("level1 0 level2 00 endlevel1 level1 1 level2 10 endlevel1 ", tmpl, .{});
     }
 }
@@ -133,16 +133,16 @@ test "foreach" {
             \\Print {{item}} at {{index}}{{ end }}
         ;
         const tmpl = Template(text, .{ .eval_branch_quota = 4000 });
-        t_expectEqual(tmpl.fragments.len, 1);
-        t.expect(tmpl.fragments[0] == .for_each);
-        t.expectEqualStrings("list", tmpl.fragments[0].for_each.slice_name);
-        t.expectEqualStrings("item", tmpl.fragments[0].for_each.capture_name);
-        t.expectEqualStrings("index", tmpl.fragments[0].for_each.capture_index_name.?);
-        t_expectEqual(tmpl.fragments[0].for_each.body.len, 4);
-        expectFragment(tmpl.fragments[0].for_each.body[0], .literal, "\nPrint ");
-        expectFragment(tmpl.fragments[0].for_each.body[1], .action, "item");
-        expectFragment(tmpl.fragments[0].for_each.body[2], .literal, " at ");
-        expectFragment(tmpl.fragments[0].for_each.body[3], .action, "index");
+        t_expectEqual(tmpl.tree.root.len, 1);
+        t.expect(tmpl.tree.root[0] == .for_each);
+        t.expectEqualStrings("list", tmpl.tree.root[0].for_each.slice_name);
+        t.expectEqualStrings("item", tmpl.tree.root[0].for_each.capture_name);
+        t.expectEqualStrings("index", tmpl.tree.root[0].for_each.capture_index_name.?);
+        t_expectEqual(tmpl.tree.root[0].for_each.body.len, 4);
+        expectNode(tmpl.tree.root[0].for_each.body[0], .text, "\nPrint ");
+        expectNode(tmpl.tree.root[0].for_each.body[1], .action, "item");
+        expectNode(tmpl.tree.root[0].for_each.body[2], .text, " at ");
+        expectNode(tmpl.tree.root[0].for_each.body[3], .action, "index");
         const list = [_]u8{ 84, 168 };
         try expectPrinted("\nPrint 84 at 0\nPrint 168 at 1", tmpl, .{ .list = list });
     }
@@ -157,7 +157,7 @@ test "scopes" {
 test "mixed scope types" { // no for_each capture index
     const text = "{{ for(0..1)|j| }}{{ for(list)|i| }}{{i}} - {{j}}, {{ end }}{{ end }}";
     const tmpl = Template(text, .{ .eval_branch_quota = 2000 });
-    t_expectEqual(tmpl.fragments.len, 1);
+    t_expectEqual(tmpl.tree.root.len, 1);
     const list = [_]u128{ 1, 2 };
     try expectPrinted("1 - 0, 2 - 0, ", tmpl, .{ .list = list });
 }
@@ -166,19 +166,19 @@ test "mixed scope types" { // no for_each capture index
 //     {
 //         const text = "{{if cond}}a{{end}}";
 //         const tmpl = Template(text, .{});
-//         t.expect(tmpl.fragments[0] == .if_);
-//         t.expectEqualStrings("cond", tmpl.fragments[0].if_.condition);
-//         t_expectEqual(tmpl.fragments[0].if_.body.len, 1);
+//         t.expect(tmpl.tree.root[0] == .if_);
+//         t.expectEqualStrings("cond", tmpl.tree.root[0].if_.condition);
+//         t_expectEqual(tmpl.tree.root[0].if_.body.len, 1);
 //         try expectPrinted("a", tmpl, .{ .cond = "asd" });
 //         try expectPrinted("", tmpl, .{ .cond = "" });
 //     }
 //     {
 //         const text = "{{if cond}}a{{else}}b{{end}}";
 //         const tmpl = Template(text, .{});
-//         t.expect(tmpl.fragments[0] == .if_);
-//         t.expectEqualStrings("cond", tmpl.fragments[0].if_.condition);
-//         t_expectEqual(tmpl.fragments[0].if_.body.len, 3);
-//         t.expect(tmpl.fragments[0].if_.body[1] == .else_);
+//         t.expect(tmpl.tree.root[0] == .if_);
+//         t.expectEqualStrings("cond", tmpl.tree.root[0].if_.condition);
+//         t_expectEqual(tmpl.tree.root[0].if_.body.len, 3);
+//         t.expect(tmpl.tree.root[0].if_.body[1] == .else_);
 //         try expectPrinted("a", tmpl, .{ .cond = "asd" });
 //         try expectPrinted("b", tmpl, .{ .cond = "" });
 //     }
