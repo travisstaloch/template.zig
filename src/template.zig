@@ -4,24 +4,36 @@ const mem = std.mem;
 // TODO: wrap in node type with fields next and node?
 // think more about how pipelines work
 
-pub const NodeType = enum { text, action, for_range, for_each, end };
+pub const NodeType = enum { text, action, range, end };
 pub const Node = union(NodeType) {
     text: []const u8,
     action: []const u8,
-    for_range: ForRange,
-    for_each: ForEach,
+    range: Branch,
     end,
-    pub const ForRange = struct {
-        start: isize,
-        end: isize,
-        capture_name: []const u8,
-        body: []const Node,
+    pub const Branch = struct {
+        pipeline: ?Pipeline = null,
+        list: ?List = null,
+        else_list: ?List = null,
     };
-    pub const ForEach = struct {
-        slice_name: []const u8,
-        capture_name: []const u8,
-        capture_index_name: ?[]const u8,
-        body: []const Node,
+    pub const List = struct {
+        len: usize,
+        root: []const Node,
+        pub fn format(value: List, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) FormatError!void {
+            try writer.print("{}", .{value.root});
+        }
+    };
+    pub const Pipeline = struct {
+        is_assign: bool, // The variables are being assigned, not declared.
+        decls: []const []const u8, // Variables in lexical order.
+        cmds: []const Command, // The commands in lexical order.
+    };
+    pub const CommandType = enum { identifier, field, constant, range };
+    pub const Command = union(CommandType) {
+        identifier: []const u8,
+        field: []const u8,
+        constant: []const u8,
+        range: struct { start: usize, end: usize },
+        // Arguments in lexical order: Identifier, field, or constant.
     };
 
     const FormatError = error{ DiskQuota, FileTooBig, InputOutput, NoSpaceLeft, AccessDenied, BrokenPipe, SystemResources, OperationAborted, NotOpenForWriting, WouldBlock, Unexpected };
@@ -29,15 +41,10 @@ pub const Node = union(NodeType) {
         switch (value) {
             .text => try writer.print("'{s}'", .{value.text}),
             .action => try writer.print("'{{{{{s}}}}}'", .{value.action}),
-            .for_range => {
-                try writer.print("for({}..{}) |{s}|", .{ value.for_range.start, value.for_range.end, value.for_range.capture_name });
-                // for (value.for_range.body) |child| try writer.print("  {}", .{child});
-                try writer.print("\n  {}", .{value.for_range.body});
-            },
-            .for_each => {
-                try writer.print("for({s}) |{s},{s}|", .{ value.for_each.slice_name, value.for_each.capture_name, value.for_each.capture_index_name });
-                // for (value.for_each.body) |child| try writer.print("  {}", .{child});
-                try writer.print("\n  {}", .{value.for_each.body});
+            .range => {
+                try writer.print("range {}", .{value.range.pipeline});
+                // for (value.range.body) |child| try writer.print("  {}", .{child});
+                try writer.print("\n  {}", .{value.range.list});
             },
             .end => unreachable,
         }
@@ -126,39 +133,74 @@ inline fn escape(comptime input: []const u8) []u8 {
     return output[0 .. input.len - (n1 + n2)];
 }
 
-fn parseForRange(comptime input: []const u8) Node {
-    std.debug.assert(mem.startsWith(u8, input, "for("));
-    var result: Node = .{ .for_range = undefined };
-    var parser = Parser{ .buf = input[4..] };
-    result.for_range.start = try std.fmt.parseInt(isize, trim(parser.untilStr("..")), 10);
-    parser.pos += 2;
-    result.for_range.end = try std.fmt.parseInt(isize, trim(parser.until(')')), 10);
-    _ = parser.until('|');
-    parser.pos += 1;
-    result.for_range.capture_name = trim(parser.until('|'));
+fn todo(comptime msg: []const u8, args: anytype) noreturn {
+    showError("todo " ++ msg, args);
+}
+
+// identifier | field | constant | range
+fn parseCommand(comptime input: []const u8) Node.Command {
+    if (std.mem.indexOf(u8, input, "..")) |dots_idx| {
+        const start = std.fmt.parseUnsigned(usize, input[0..dots_idx], 10) catch |e| showError("invalid range start '{}'. {s}", .{ input[0..dots_idx], @errorName(e) });
+        const end = std.fmt.parseUnsigned(usize, input[dots_idx + 2 ..], 10) catch |e| showError("invalid range end '{}'. {s}", .{ input[0..dots_idx], @errorName(e) });
+        return .{ .range = .{ .start = start, .end = end } };
+    }
+    return switch (input[0]) {
+        '.' => .{ .field = input[1..] },
+        'a'...'z', 'A'...'Z' => .{ .identifier = input },
+        '0'...'9', '-' => .{ .constant = std.fmt.parseInt(usize, input[0..dots_idx], 10) catch |e| showError("invalid constant value '{}'. {s}", .{ input[0..dots_idx], @errorName(e) }) },
+        else => showError("parseCommand: unsupported command type {s}", .{input}),
+    };
+}
+
+// Pipeline:
+//	declarations? command ('|' command)*
+fn parsePipeline(comptime input: []const u8) Node.Pipeline {
+    var result: Node.Pipeline = .{ .is_assign = false, .cmds = &[_]Node.Command{}, .decls = &[_][]const u8{} };
+
+    var parser = Parser{ .buf = trim(input) };
+    if (std.mem.indexOfScalar(u8, input, '=')) |eqpos_| {
+        // @compileLog("eqpos_", eqpos_);
+        result.is_assign = true;
+        const is_decl_assign = input[eqpos_ - 1] == ':'; // check for :=
+        const eqpos = if (is_decl_assign) eqpos_ - 1 else eqpos_;
+        while (parser.pos < eqpos_) {
+            // declarations
+            // @compileLog(parser.pos, eqpos_, parser.buf.len);
+            var next = trim(parser.untilOneOf(",=:"));
+
+            // @compileLog(next);
+            if (next.len == 0) break;
+            if (next[0] == '$') {
+                result.decls = result.decls ++ &[1][]const u8{next};
+            } else {
+                todo("declarations: '{s}'", .{input});
+            }
+            parser.pos += 1;
+        }
+        parser.pos += 1;
+    }
+    // @compileLog(parser.pos);
+    // commands
+    while (true) {
+        var cmd_text = trim(parser.until('|'));
+        // @compileLog(cmd_text);
+        if (cmd_text.len == 0) break;
+        result.cmds = result.cmds ++ [1]Node.Command{parseCommand(cmd_text)};
+    }
     return result;
 }
 
-fn parseForEach(comptime input: []const u8) Node {
-    std.debug.assert(mem.startsWith(u8, input, "for("));
-    var parser = Parser{ .buf = input[4..] };
-    var result: Node = .{ .for_each = undefined };
-    result.for_each.capture_index_name = null;
-    result.for_each.slice_name = trim(parser.until(')'));
-    _ = parser.until('|');
-    parser.pos += 1;
-    result.for_each.capture_name = trim(parser.untilOneOf(",|"));
-    if (parser.peek(0)) |c| {
-        if (c == ',') {
-            parser.pos += 1;
-            result.for_each.capture_index_name = trim(parser.until('|'));
-        }
-    }
+// {{range pipeline}} T1 {{end}}
+// {{range pipeline}} T1 {{else}} T0 {{end}}
+fn parseRange(comptime input: []const u8) Node {
+    std.debug.assert(mem.startsWith(u8, input, "range"));
+    var result: Node = .{ .range = .{ .pipeline = parsePipeline(input[5..]) } };
     return result;
 }
 
 /// trim trailing and leading whitespace
 fn trim(s_: []const u8) []const u8 {
+    if (s_.len == 0) return s_;
     var s = s_;
     while (mem.indexOfScalar(u8, &std.ascii.spaces, s[0])) |_|
         s = s[1..];
@@ -187,21 +229,12 @@ inline fn parseNodes(comptime fmt: []const u8) []const Node {
             '}' => {
                 const next = parser.peek(1) orelse break;
                 if (next != c) continue;
-                var state: NodeType = .action;
                 var action = parser.fromMark();
                 if (action.len != 0) {
                     action = trim(action);
-                    // change state if this is a for_range or for_each
-                    if (mem.startsWith(u8, action, "for")) {
-                        state = blk: {
-                            const dotsidx = mem.indexOf(u8, action, "..") orelse break :blk .for_each;
-                            const rparidx = mem.indexOf(u8, action, ")") orelse return error.MissingRightParen;
-                            break :blk if (dotsidx < rparidx) .for_range else .for_each;
-                        };
-                        nodes = nodes ++ if (state == .for_range)
-                            [1]Node{parseForRange(escape(action))}
-                        else
-                            [1]Node{parseForEach(escape(action))};
+                    // showError("{s}", .{action});
+                    if (mem.startsWith(u8, action, "range")) {
+                        nodes = nodes ++ [1]Node{parseRange(escape(action))};
                     } else if (memeql(action, "end"))
                         nodes = nodes ++ [1]Node{.end}
                     else
@@ -219,26 +252,22 @@ inline fn parseNodes(comptime fmt: []const u8) []const Node {
     }
     return nodes;
 }
-
 /// recursively appends children of for_range and for_each loops to their bodies
 /// until end action reached
-const Tree = struct { len: usize, root: []const Node };
-fn parseTree(comptime flat_nodes: []const Node) Tree {
+fn parseTree(comptime flat_nodes: []const Node) Node.List {
     var result: []const Node = &[0]Node{};
+
     var i: usize = 0;
     while (i < flat_nodes.len) : (i += 1) {
         var node = flat_nodes[i];
         // append children until end
         switch (node) {
-            .for_each,
-            .for_range,
-            => {
+            .range => {
                 i += 1;
-                const nresult = parseTree(flat_nodes[i..]);
-                var node_tag = &@field(node, @tagName(node));
-                node_tag.body = nresult.root;
-                if (nresult.len > 0)
-                    i += nresult.len;
+                const list = parseTree(flat_nodes[i..]);
+                node.range.list = list;
+                if (list.len > 0)
+                    i += list.len;
             },
             .end => break,
             else => {},
@@ -248,21 +277,20 @@ fn parseTree(comptime flat_nodes: []const Node) Tree {
     return .{ .len = i, .root = result };
 }
 
-fn visitNodes(nodes: []const Node, ctx: anytype, cb: fn (Node, @TypeOf(ctx)) void) void {
-    for (nodes) |node| {
-        switch (node) {
-            .for_each, .for_range => {
-                cb(node, ctx);
-                visitTree(@field(node, @tagName(node)).body, ctx, cb);
-            },
-            else => cb(node, ctx),
-        }
-    }
-}
+// fn visitNodes(nodes: []const Node, ctx: anytype, cb: fn (Node, @TypeOf(ctx)) void) void {
+//     for (nodes) |node| {
+//         switch (node) {
+//             .for_each, .for_range => {
+//                 cb(node, ctx);
+//                 visitTree(@field(node, @tagName(node)).body, ctx, cb);
+//             },
+//             else => cb(node, ctx),
+//         }
+//     }
+// }
 
-// pub const Duck = struct { value: anytype };
 const Options = struct {
-    eval_branch_quota: usize = 1050,
+    eval_branch_quota: usize = 1000,
     name: ?[]const u8 = null,
 };
 pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
@@ -297,6 +325,10 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
             comptime var i: comptime_int = 0;
             inline while (i < nodes.len) : (i += 1) {
                 const node = nodes[i];
+                // std.debug.print(
+                //     "bufPrintImpl node {}:{} i {} scopes.len {}\n",
+                //     .{ std.meta.activeTag(node), node, i, scopes.len },
+                // );
                 switch (node) {
                     .text => _ = try writer.write(node.text),
                     .action => {
@@ -306,41 +338,89 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
                             // search scopes
                             inline for (scopes) |scope| {
                                 inline for (scope) |entry| {
+                                    // std.debug.print("searching scopes for '{s}' action '{s}'\n", .{ entry.key, node.action });
                                     if (memeql(entry.key, node.action)) {
+                                        // std.debug.print("found scope entry {s} {}\n", .{ entry.key, entry.value });
                                         _ = try writer.print("{}", .{entry.value});
                                     }
                                 }
                             }
                         }
                     },
-                    .for_range => {
-                        comptime var j = node.for_range.start;
-                        inline while (j < node.for_range.end) : (j += 1) {
-                            try bufPrintImpl(
-                                try appendScope(scopes, node.for_range.capture_name, j),
-                                node.for_range.body,
-                                writer,
-                                args,
-                            );
-                        }
-                    },
-                    .for_each => {
-                        const slice = @field(args, node.for_each.slice_name);
-                        inline for (slice) |item, index| {
-                            if (node.for_each.capture_index_name) |idx_name|
-                                try bufPrintImpl(
-                                    try appendScope(try appendScope(scopes, node.for_each.capture_name, item), idx_name, index),
-                                    node.for_each.body,
-                                    writer,
-                                    args,
-                                )
-                            else
-                                try bufPrintImpl(
-                                    try appendScope(scopes, node.for_each.capture_name, item),
-                                    node.for_each.body,
-                                    writer,
-                                    args,
-                                );
+                    .range => {
+                        if (node.range.pipeline) |pipeline| {
+                            if (pipeline.is_assign and pipeline.decls.len == 2) {
+                                std.debug.assert(pipeline.cmds.len == 1);
+                                if (pipeline.cmds[0] == .range) {
+                                    const idx_name = pipeline.decls[0];
+                                    const item_name = pipeline.decls[1];
+                                    comptime var item = pipeline.cmds[0].range.start;
+                                    comptime var index: usize = 0;
+                                    inline while (item <= pipeline.cmds[0].range.end) : ({
+                                        item += 1;
+                                        index += 1;
+                                    }) {
+                                        // std.debug.print("item {} index {}\n", .{ item, index });
+                                        const new_scope_entries = [_]ScopeEntry{
+                                            .{ .key = item_name, .value = item },
+                                            .{ .key = idx_name, .value = index },
+                                        };
+                                        try bufPrintImpl(
+                                            try appendScope(scopes, &new_scope_entries),
+                                            node.range.list.?.root,
+                                            writer,
+                                            args,
+                                        );
+                                    }
+                                } else if (pipeline.cmds[0] == .field) {
+                                    const idx_name = pipeline.decls[0];
+                                    const item_name = pipeline.decls[1];
+                                    const items = @field(args, pipeline.cmds[0].field);
+                                    inline for (items) |item, index| {
+                                        const new_scope_entries = [_]ScopeEntry{
+                                            .{ .key = item_name, .value = item },
+                                            .{ .key = idx_name, .value = index },
+                                        };
+                                        try bufPrintImpl(
+                                            try appendScope(scopes, &new_scope_entries),
+                                            node.range.list.?.root,
+                                            writer,
+                                            args,
+                                        );
+                                    }
+                                } else showError("unsupported range command", .{});
+                            } else {
+                                std.debug.assert(pipeline.cmds.len == 1);
+                                if (pipeline.cmds[0] == .range) {
+                                    const item_name = pipeline.decls[0];
+                                    comptime var item = pipeline.cmds[0].range.start;
+                                    inline while (item <= pipeline.cmds[0].range.end) : ({
+                                        item += 1;
+                                    }) {
+                                        // std.debug.print("item {} index {}\n", .{ item, index });
+                                        const new_scope_entries = [_]ScopeEntry{.{ .key = item_name, .value = item }};
+                                        try bufPrintImpl(
+                                            try appendScope(scopes, &new_scope_entries),
+                                            node.range.list.?.root,
+                                            writer,
+                                            args,
+                                        );
+                                    }
+                                } else if (pipeline.cmds[0] == .field) {
+                                    const items = @field(args, pipeline.cmds[0].field);
+                                    inline for (items) |item| {
+                                        // std.debug.print("item {} index {}\n", .{ item, index });
+                                        const item_name = pipeline.decls[0];
+                                        const new_scope_entries = [_]ScopeEntry{.{ .key = item_name, .value = item }};
+                                        try bufPrintImpl(
+                                            try appendScope(scopes, &new_scope_entries),
+                                            node.range.list.?.root,
+                                            writer,
+                                            args,
+                                        );
+                                    }
+                                } else comptime showError("unsupported range command {}", .{pipeline.cmds[0]});
+                            }
                         }
                     },
                     // .if_ => {
@@ -386,9 +466,9 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
             return try bufPrint(buf, args);
         }
 
-        fn appendScope(comptime scopes: []const []const ScopeEntry, comptime key: []const u8, value: anytype) ![]const []const ScopeEntry {
-            for (scopes) |scope| for (scope) |entry| if (memeql(entry.key, key)) return error.DuplicateKey;
-            return scopes ++ [_][]const ScopeEntry{&[1]ScopeEntry{.{ .key = key, .value = value }}};
+        fn appendScope(comptime scopes: []const []const ScopeEntry, comptime entries: []const ScopeEntry) ![]const []const ScopeEntry {
+            for (scopes) |scope| for (scope) |entry| for (entries) |newentry| if (memeql(entry.key, newentry.key)) return error.DuplicateKey;
+            return scopes ++ [_][]const ScopeEntry{entries};
         }
     };
 }

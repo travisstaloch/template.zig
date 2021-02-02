@@ -63,7 +63,7 @@ test "escapes" {
     const tmpl = Template("\\{\\{0\\}\\}", .{});
     t_expectEqual(tmpl.tree.root.len, 1);
     expectNode(tmpl.tree.root[0], .text, "{{0}}");
-    try expectPrinted("{{0}}", tmpl, .{"zug"});
+    try expectPrinted("{{0}}", tmpl, .{});
 }
 
 test "variables" {
@@ -86,77 +86,77 @@ test "variables" {
     }
 }
 
-test "for range" {
+test "range" {
     {
-        const text = "{{ for(0..2) |index| }} a {{index}} b {{ end }} c";
+        const text = "{{ range $i, $e := 1..2 }} a {{$i}}:{{$e}} b {{ end }} c";
         const tmpl = Template(text, .{ .eval_branch_quota = 8000 });
         t_expectEqual(tmpl.tree.root.len, 2);
-        t.expect(tmpl.tree.root[0] == .for_range);
-        t_expectEqual(tmpl.tree.root[0].for_range.start, 0);
-        t_expectEqual(tmpl.tree.root[0].for_range.end, 2);
-        t.expectEqualStrings("index", tmpl.tree.root[0].for_range.capture_name);
-        t_expectEqual(tmpl.tree.root[0].for_range.body.len, 3);
-        expectNode(tmpl.tree.root[0].for_range.body[0], .text, " a ");
-        expectNode(tmpl.tree.root[0].for_range.body[1], .action, "index");
-        expectNode(tmpl.tree.root[0].for_range.body[2], .text, " b ");
+        t.expect(tmpl.tree.root[0] == .range);
         t.expect(tmpl.tree.root[1] == .text);
-        t.expectEqualStrings(" c", tmpl.tree.root[1].text);
-        try expectPrinted(" a 0 b  a 1 b  c", tmpl, .{});
+        // std.debug.print("tmpl {}\n", .{tmpl.tree.root});
+        t_expectEqual(tmpl.tree.root[0].range.pipeline.?.decls.len, 2);
+        t.expectEqualStrings(tmpl.tree.root[0].range.pipeline.?.decls[0], "$i");
+        t.expectEqualStrings(tmpl.tree.root[0].range.pipeline.?.decls[1], "$e");
+        t_expectEqual(tmpl.tree.root[0].range.pipeline.?.cmds[0].range.start, 1);
+        t_expectEqual(tmpl.tree.root[0].range.pipeline.?.cmds[0].range.end, 2);
+        t_expectEqual(tmpl.tree.root[0].range.list.?.len, 5);
+        try expectPrinted(" a 0:1 b  a 1:2 b  c", tmpl, .{});
     }
     {
         const text =
-            \\{{ for(0..2) |index| }}level1 {{index}}{{
-            \\      for(0..1) |index2|}} level2 {{index}}{{index2}}{{ end }} endlevel1 {{ end }}
+            \\{{ range $index := 0..1 }}level1 {{$index}}{{
+            \\      range $index2 := 0..0}} level2 {{$index}}{{$index2}}{{ end }} endlevel1 {{ end }}
         ;
         const tmpl = Template(text, .{});
         t_expectEqual(tmpl.tree.root.len, 1);
-        t.expect(tmpl.tree.root[0] == .for_range);
-        t_expectEqual(tmpl.tree.root[0].for_range.body.len, 4);
-        expectNode(tmpl.tree.root[0].for_range.body[0], .text, "level1 ");
-        expectNode(tmpl.tree.root[0].for_range.body[1], .action, "index");
-        t.expect(tmpl.tree.root[0].for_range.body[2] == .for_range);
-        t.expectEqualStrings("index2", tmpl.tree.root[0].for_range.body[2].for_range.capture_name);
-        expectNode(tmpl.tree.root[0].for_range.body[1], .action, "index");
-        t_expectEqual(tmpl.tree.root[0].for_range.body[2].for_range.body.len, 3);
-        expectNode(tmpl.tree.root[0].for_range.body[2].for_range.body[0], .text, " level2 ");
-        expectNode(tmpl.tree.root[0].for_range.body[2].for_range.body[1], .action, "index");
-        expectNode(tmpl.tree.root[0].for_range.body[2].for_range.body[2], .action, "index2");
-        expectNode(tmpl.tree.root[0].for_range.body[3], .text, " endlevel1 ");
+        t.expect(tmpl.tree.root[0] == .range);
+        t_expectEqual(tmpl.tree.root[0].range.list.?.len, 8);
+        expectNode(tmpl.tree.root[0].range.list.?.root[0], .text, "level1 ");
+        expectNode(tmpl.tree.root[0].range.list.?.root[1], .action, "$index");
+        t.expect(tmpl.tree.root[0].range.list.?.root[2] == .range);
+        t.expectEqualStrings("$index2", tmpl.tree.root[0].range.list.?.root[2].range.pipeline.?.decls[0]);
+        expectNode(tmpl.tree.root[0].range.list.?.root[1], .action, "$index");
+        t_expectEqual(tmpl.tree.root[0].range.list.?.root[2].range.list.?.root.len, 3);
+        expectNode(tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[0], .text, " level2 ");
+        expectNode(tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[1], .action, "$index");
+        expectNode(tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[2], .action, "$index2");
+        expectNode(tmpl.tree.root[0].range.list.?.root[3], .text, " endlevel1 ");
         try expectPrinted("level1 0 level2 00 endlevel1 level1 1 level2 10 endlevel1 ", tmpl, .{});
     }
 }
 
-test "foreach" {
+// TODO convert to range
+test "range2" {
     {
         const text =
-            \\{{ for(list) |item, index| }}
-            \\Print {{item}} at {{index}}{{ end }}
+            \\{{ range $index, $item := .list }}
+            \\Print {{$item}} at {{$index}}{{ end }}
         ;
         const tmpl = Template(text, .{ .eval_branch_quota = 4000 });
         t_expectEqual(tmpl.tree.root.len, 1);
-        t.expect(tmpl.tree.root[0] == .for_each);
-        t.expectEqualStrings("list", tmpl.tree.root[0].for_each.slice_name);
-        t.expectEqualStrings("item", tmpl.tree.root[0].for_each.capture_name);
-        t.expectEqualStrings("index", tmpl.tree.root[0].for_each.capture_index_name.?);
-        t_expectEqual(tmpl.tree.root[0].for_each.body.len, 4);
-        expectNode(tmpl.tree.root[0].for_each.body[0], .text, "\nPrint ");
-        expectNode(tmpl.tree.root[0].for_each.body[1], .action, "item");
-        expectNode(tmpl.tree.root[0].for_each.body[2], .text, " at ");
-        expectNode(tmpl.tree.root[0].for_each.body[3], .action, "index");
+        t.expect(tmpl.tree.root[0] == .range);
+        t.expectEqualStrings("$index", tmpl.tree.root[0].range.pipeline.?.decls[0]);
+        t.expectEqualStrings("$item", tmpl.tree.root[0].range.pipeline.?.decls[1]);
+        t.expectEqualStrings("list", tmpl.tree.root[0].range.pipeline.?.cmds[0].field);
+        t_expectEqual(tmpl.tree.root[0].range.list.?.root.len, 4);
+        expectNode(tmpl.tree.root[0].range.list.?.root[0], .text, "\nPrint ");
+        expectNode(tmpl.tree.root[0].range.list.?.root[1], .action, "$item");
+        expectNode(tmpl.tree.root[0].range.list.?.root[2], .text, " at ");
+        expectNode(tmpl.tree.root[0].range.list.?.root[3], .action, "$index");
         const list = [_]u8{ 84, 168 };
         try expectPrinted("\nPrint 84 at 0\nPrint 168 at 1", tmpl, .{ .list = list });
     }
 }
 
 test "scopes" {
-    const text = "{{for(0..1)|i|}}{{for(0..1)|i|}}{{end}}{{end}}";
-    const tmpl = Template(text, .{ .eval_branch_quota = 2000 });
+    const text = "{{ range $i := 0..1}}{{ range $i := 0..1}}{{end}}{{end}}";
+    const tmpl = Template(text, .{ .eval_branch_quota = 4000 });
     t.expectError(error.DuplicateKey, tmpl.bufPrint(&print_buf, .{}));
 }
 
 test "mixed scope types" { // no for_each capture index
-    const text = "{{ for(0..1)|j| }}{{ for(list)|i| }}{{i}} - {{j}}, {{ end }}{{ end }}";
-    const tmpl = Template(text, .{ .eval_branch_quota = 2000 });
+    const text = "{{ range $j := 0..0 }}{{ range $i := .list }}{{$i}} - {{$j}}, {{ end }}{{ end }}";
+    const tmpl = Template(text, .{ .eval_branch_quota = 4000 });
     t_expectEqual(tmpl.tree.root.len, 1);
     const list = [_]u128{ 1, 2 };
     try expectPrinted("1 - 0, 2 - 0, ", tmpl, .{ .list = list });
@@ -215,7 +215,7 @@ test "template variables" {
 test "for range loop" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
-        "5 times: {{ for( 0..5 ) | index | }}{{ index }}{{ end }}",
+        "5 times: {{ range $index := 0..4 }}{{ $index }}{{ end }}",
         .{ .eval_branch_quota = 4000 },
     );
     // bufPrint
@@ -230,7 +230,7 @@ test "for range loop" {
 test "for each loop" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
-        "5 times: {{ for( items ) | item, index | }}{{item}}-{{ index }},{{ end }}",
+        "5 times: {{ range $index, $item := .items }}{{$item}}-{{ $index }},{{ end }}",
         .{ .eval_branch_quota = 4000 },
     );
     // bufPrint
