@@ -6,7 +6,6 @@ usingnamespace @import("template.zig");
 // -------------
 const t = std.testing;
 const allocator = t.allocator;
-var print_buf: [1000]u8 = undefined;
 
 fn t_expectEqual(actual: anytype, expected: @TypeOf(actual)) void {
     t.expectEqual(expected, actual);
@@ -162,27 +161,47 @@ test "mixed scope types" { // no for_each capture index
     try expectPrinted("1 - 0, 2 - 0, ", tmpl, .{ .list = list });
 }
 
-// test "if" {
-//     {
-//         const text = "{{if cond}}a{{end}}";
-//         const tmpl = Template(text, .{});
-//         t.expect(tmpl.tree.root[0] == .if_);
-//         t.expectEqualStrings("cond", tmpl.tree.root[0].if_.condition);
-//         t_expectEqual(tmpl.tree.root[0].if_.body.len, 1);
-//         try expectPrinted("a", tmpl, .{ .cond = "asd" });
-//         try expectPrinted("", tmpl, .{ .cond = "" });
-//     }
-//     {
-//         const text = "{{if cond}}a{{else}}b{{end}}";
-//         const tmpl = Template(text, .{});
-//         t.expect(tmpl.tree.root[0] == .if_);
-//         t.expectEqualStrings("cond", tmpl.tree.root[0].if_.condition);
-//         t_expectEqual(tmpl.tree.root[0].if_.body.len, 3);
-//         t.expect(tmpl.tree.root[0].if_.body[1] == .else_);
-//         try expectPrinted("a", tmpl, .{ .cond = "asd" });
-//         try expectPrinted("b", tmpl, .{ .cond = "" });
-//     }
-// }
+test "if" {
+    {
+        const text = "{{if .cond}}a{{end}}";
+        const tmpl = Template(text, .{});
+        t.expect(tmpl.tree.root[0] == .if_);
+        t.expectEqualStrings("cond", tmpl.tree.root[0].if_.pipeline.?.cmds[0].field);
+        t_expectEqual(tmpl.tree.root[0].if_.list.?.root.len, 1);
+        try expectPrinted("a", tmpl, .{ .cond = "foo" });
+        try expectPrinted("", tmpl, .{ .cond = "" });
+    }
+    {
+        const text = "{{if .cond}}a{{else}}b{{end}}";
+        const tmpl = Template(text, .{});
+        t.expect(tmpl.tree.root[0] == .if_);
+        t.expectEqualStrings("cond", tmpl.tree.root[0].if_.pipeline.?.cmds[0].field);
+        t_expectEqual(tmpl.tree.root[0].if_.list.?.len, 1);
+        t.expectEqual(tmpl.tree.root[0].if_.else_list.?.len, 1);
+        t.expect(tmpl.tree.root[0].if_.else_list.?.root[0] == .text);
+        try expectPrinted("a", tmpl, .{ .cond = "foo" });
+        try expectPrinted("b", tmpl, .{ .cond = "" });
+    }
+    {
+        const text = "{{if .cond}}a{{else if .cond2}}b{{else}}c{{end}}";
+        const tmpl = Template(text, .{ .eval_branch_quota = 4000 });
+        t.expect(tmpl.tree.root[0] == .if_);
+        t.expectEqualStrings("cond", tmpl.tree.root[0].if_.pipeline.?.cmds[0].field);
+        t_expectEqual(tmpl.tree.root[0].if_.list.?.len, 1);
+        t.expectEqual(tmpl.tree.root[0].if_.else_list.?.len, 5);
+        t.expect(tmpl.tree.root[0].if_.else_list.?.root[0] == .if_);
+        t.expect(tmpl.tree.root[0].if_.else_list.?.root[0].if_.pipeline.?.cmds[0] == .field);
+        t.expect(tmpl.tree.root[0].if_.else_list.?.root[0].if_.list.?.root[0] == .text);
+        t.expect(tmpl.tree.root[0].if_.else_list.?.root[0].if_.else_list.?.root[0] == .text);
+        t.expectEqualStrings("c", tmpl.tree.root[0].if_.else_list.?.root[0].if_.else_list.?.root[0].text);
+        try expectPrinted("a", tmpl, .{ .cond = true });
+        try expectPrinted("a", tmpl, .{ .cond = [1]bool{false} });
+        try expectPrinted("b", tmpl, .{ .cond2 = true });
+        try expectPrinted("c", tmpl, .{ .cond = @as(?u8, null), .cond2 = [0]bool{} });
+        try expectPrinted("c", tmpl, .{ .cond = 0, .cond2 = 0.0 });
+        try expectPrinted("c", tmpl, .{ .cond = @as(u8, 0), .cond2 = @as(f32, 0.0) });
+    }
+}
 
 test "multiple templates" {
     const template = @import("template.zig");
@@ -197,6 +216,8 @@ test "multiple templates" {
 // --------------------
 // --- readme tests ---
 // --------------------
+var print_buf: [1000]u8 = undefined;
+
 test "template variables" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
@@ -204,7 +225,6 @@ test "template variables" {
         .{ .eval_branch_quota = 1000 }, // default value. same as .{}
     );
     // bufPrint
-    var buf: [100]u8 = undefined;
     const message = try tmpl.bufPrint(&print_buf, .{ .world = "friends" });
     std.testing.expectEqualStrings("Hello friends", message);
     // allocPrint
@@ -219,7 +239,6 @@ test "for range loop" {
         .{ .eval_branch_quota = 4000 },
     );
     // bufPrint
-    var buf: [100]u8 = undefined;
     const message = try tmpl.bufPrint(&print_buf, .{});
     std.testing.expectEqualStrings("5 times: 01234", message);
     // allocPrint
@@ -234,7 +253,6 @@ test "for each loop" {
         .{ .eval_branch_quota = 4000 },
     );
     // bufPrint
-    var buf: [100]u8 = undefined;
     const items = [_]u8{ 0, 1, 2, 3, 4 };
     const message = try tmpl.bufPrint(&print_buf, .{ .items = items });
     std.testing.expectEqualStrings("5 times: 0-0,1-1,2-2,3-3,4-4,", message);
@@ -243,6 +261,15 @@ test "for each loop" {
     defer std.testing.allocator.free(message2);
     std.testing.expectEqualStrings("5 times: 0-0,1-1,2-2,3-3,4-4,", message2);
 }
+
+test "if - else if - else" {
+    const Tmpl = @import("template.zig").Template;
+    const tmpl = Tmpl("{{if .cond}}a{{else if .cond2}}b{{else}}c{{end}}", .{});
+    std.testing.expectEqualStrings("a", try tmpl.bufPrint(&print_buf, .{ .cond = true }));
+    std.testing.expectEqualStrings("b", try tmpl.bufPrint(&print_buf, .{ .cond2 = 1 }));
+    std.testing.expectEqualStrings("c", try tmpl.bufPrint(&print_buf, .{}));
+}
+
 // --------------------
 // - end readme tests -
 // --------------------

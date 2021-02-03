@@ -8,8 +8,11 @@ All 12 tests passed.
 $ zig build # results in zig-cache/lib/libtemplate.zig.a
 ```
 
-from end of [tests.zig](src/tests.zig)
+from [tests.zig](src/tests.zig)
 ```zig
+
+var print_buf: [1000]u8 = undefined;
+
 test "template variables" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
@@ -17,7 +20,6 @@ test "template variables" {
         .{ .eval_branch_quota = 1000 }, // default value. same as .{}
     );
     // bufPrint
-    var buf: [100]u8 = undefined;
     const message = try tmpl.bufPrint(&print_buf, .{ .world = "friends" });
     std.testing.expectEqualStrings("Hello friends", message);
     // allocPrint
@@ -25,15 +27,13 @@ test "template variables" {
     defer std.testing.allocator.free(message2);
     std.testing.expectEqualStrings("Hello again friends", message2);
 }
-
 test "for range loop" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
-        "5 times: {{ for( 0..5 ) | index | }}{{ index }}{{ end }}",
+        "5 times: {{ range $index := 0..4 }}{{ $index }}{{ end }}",
         .{ .eval_branch_quota = 4000 },
     );
     // bufPrint
-    var buf: [100]u8 = undefined;
     const message = try tmpl.bufPrint(&print_buf, .{});
     std.testing.expectEqualStrings("5 times: 01234", message);
     // allocPrint
@@ -41,15 +41,13 @@ test "for range loop" {
     defer std.testing.allocator.free(message2);
     std.testing.expectEqualStrings("5 times: 01234", message2);
 }
-
 test "for each loop" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
-        "5 times: {{ for( items ) | item, index | }}{{item}}-{{ index }},{{ end }}",
+        "5 times: {{ range $index, $item := .items }}{{$item}}-{{ $index }},{{ end }}",
         .{ .eval_branch_quota = 4000 },
     );
     // bufPrint
-    var buf: [100]u8 = undefined;
     const items = [_]u8{ 0, 1, 2, 3, 4 };
     const message = try tmpl.bufPrint(&print_buf, .{ .items = items });
     std.testing.expectEqualStrings("5 times: 0-0,1-1,2-2,3-3,4-4,", message);
@@ -58,6 +56,15 @@ test "for each loop" {
     defer std.testing.allocator.free(message2);
     std.testing.expectEqualStrings("5 times: 0-0,1-1,2-2,3-3,4-4,", message2);
 }
+
+test "if - else if - else" {
+    const Tmpl = @import("template.zig").Template;
+    const tmpl = Tmpl("{{if .cond}}a{{else if .cond2}}b{{else}}c{{end}}", .{});
+    std.testing.expectEqualStrings("a", try tmpl.bufPrint(&print_buf, .{ .cond = true }));
+    std.testing.expectEqualStrings("b", try tmpl.bufPrint(&print_buf, .{ .cond2 = 1 }));
+    std.testing.expectEqualStrings("c", try tmpl.bufPrint(&print_buf, .{}));
+}
+
 ```
 
 # resources

@@ -4,11 +4,13 @@ const mem = std.mem;
 // TODO: wrap in node type with fields next and node?
 // think more about how pipelines work
 
-pub const NodeType = enum { text, action, range, end };
+pub const NodeType = enum { text, action, range, end, if_, else_ };
 pub const Node = union(NodeType) {
     text: []const u8,
-    action: []const u8,
+    action: []const u8, // TODO: is action the correct name for this field?
     range: Branch,
+    if_: Branch,
+    else_,
     end,
     pub const Branch = struct {
         pipeline: ?Pipeline = null,
@@ -46,7 +48,11 @@ pub const Node = union(NodeType) {
                 // for (value.range.body) |child| try writer.print("  {}", .{child});
                 try writer.print("\n  {}", .{value.range.list});
             },
-            .end => unreachable,
+            .if_ => {
+                try writer.print("if {}", .{value.if_.pipeline});
+                try writer.print("\n  {}", .{value.if_.list});
+            },
+            .end, .else_ => unreachable,
         }
     }
 };
@@ -134,7 +140,7 @@ inline fn escape(comptime input: []const u8) []u8 {
 }
 
 fn todo(comptime msg: []const u8, args: anytype) noreturn {
-    showError("todo " ++ msg, args);
+    showError("TODO: " ++ msg, args);
 }
 
 // identifier | field | constant | range
@@ -147,8 +153,8 @@ fn parseCommand(comptime input: []const u8) Node.Command {
     return switch (input[0]) {
         '.' => .{ .field = input[1..] },
         'a'...'z', 'A'...'Z' => .{ .identifier = input },
-        '0'...'9', '-' => .{ .constant = std.fmt.parseInt(usize, input[0..dots_idx], 10) catch |e| showError("invalid constant value '{}'. {s}", .{ input[0..dots_idx], @errorName(e) }) },
-        else => showError("parseCommand: unsupported command type {s}", .{input}),
+        // '0'...'9', '-' => .{ .constant = std.fmt.parseInt(usize, input[0..dots_idx], 10) catch |e| showError("invalid constant value '{}'. {s}", .{ input[0..dots_idx], @errorName(e) }) },
+        else => todo("parseCommand: unsupported command type {s}", .{input}),
     };
 }
 
@@ -194,8 +200,12 @@ fn parsePipeline(comptime input: []const u8) Node.Pipeline {
 // {{range pipeline}} T1 {{else}} T0 {{end}}
 fn parseRange(comptime input: []const u8) Node {
     std.debug.assert(mem.startsWith(u8, input, "range"));
-    var result: Node = .{ .range = .{ .pipeline = parsePipeline(input[5..]) } };
-    return result;
+    return .{ .range = .{ .pipeline = parsePipeline(input[5..]) } };
+}
+
+fn parseIf(comptime input: []const u8) Node {
+    std.debug.assert(mem.startsWith(u8, input, "if"));
+    return .{ .if_ = .{ .pipeline = parsePipeline(input[2..]) } };
 }
 
 /// trim trailing and leading whitespace
@@ -232,9 +242,18 @@ inline fn parseNodes(comptime fmt: []const u8) []const Node {
                 var action = parser.fromMark();
                 if (action.len != 0) {
                     action = trim(action);
-                    // showError("{s}", .{action});
                     if (mem.startsWith(u8, action, "range")) {
                         nodes = nodes ++ [1]Node{parseRange(escape(action))};
+                    } else if (mem.startsWith(u8, action, "if")) {
+                        nodes = nodes ++ [1]Node{parseIf(escape(action))};
+                    } else if (mem.startsWith(u8, action, "else if")) {
+                        // Treat
+                        //	{{if a}}_{{else if b}}_{{end}}
+                        // as
+                        //	{{if a}}_{{else}}{{if b}}_{{end}}{{end}}.
+                        nodes = nodes ++ [2]Node{ .else_, parseIf(escape(action[5..])) };
+                    } else if (mem.startsWith(u8, action, "else")) {
+                        nodes = nodes ++ [1]Node{.else_};
                     } else if (memeql(action, "end"))
                         nodes = nodes ++ [1]Node{.end}
                     else
@@ -252,9 +271,9 @@ inline fn parseNodes(comptime fmt: []const u8) []const Node {
     }
     return nodes;
 }
-/// recursively appends children of for_range and for_each loops to their bodies
+/// recursively appends children of range loops to their bodies
 /// until end action reached
-fn parseTree(comptime flat_nodes: []const Node) Node.List {
+fn parseTree(comptime flat_nodes: []const Node, comptime stop_types: []const NodeType) Node.List {
     var result: []const Node = &[0]Node{};
 
     var i: usize = 0;
@@ -264,13 +283,31 @@ fn parseTree(comptime flat_nodes: []const Node) Node.List {
         switch (node) {
             .range => {
                 i += 1;
-                const list = parseTree(flat_nodes[i..]);
+                const list = parseTree(flat_nodes[i..], &[_]NodeType{.end});
                 node.range.list = list;
                 if (list.len > 0)
                     i += list.len;
             },
-            .end => break,
-            else => {},
+            .if_ => {
+                {
+                    i += 1;
+                    const list = parseTree(flat_nodes[i..], &[_]NodeType{ .end, .else_ });
+                    node.if_.list = list;
+                    if (list.len > 0)
+                        i += list.len;
+                }
+                if (i < flat_nodes.len and flat_nodes[i] == .else_) {
+                    // @compileLog("else", flat_nodes[i]);
+                    i += 1;
+                    const list = parseTree(flat_nodes[i..], &[_]NodeType{.end});
+                    node.if_.else_list = list;
+                    if (list.len > 0)
+                        i += list.len;
+                }
+            },
+            else => {
+                if (std.mem.indexOfScalar(NodeType, stop_types, node)) |_| break;
+            },
         }
         result = result ++ &[1]Node{node};
     }
@@ -280,7 +317,7 @@ fn parseTree(comptime flat_nodes: []const Node) Node.List {
 // fn visitNodes(nodes: []const Node, ctx: anytype, cb: fn (Node, @TypeOf(ctx)) void) void {
 //     for (nodes) |node| {
 //         switch (node) {
-//             .for_each, .for_range => {
+//             .range => {
 //                 cb(node, ctx);
 //                 visitTree(@field(node, @tagName(node)).body, ctx, cb);
 //             },
@@ -290,18 +327,17 @@ fn parseTree(comptime flat_nodes: []const Node) Node.List {
 // }
 
 const Options = struct {
-    eval_branch_quota: usize = 1000,
+    eval_branch_quota: usize = 1050,
     name: ?[]const u8 = null,
 };
 pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
     @setEvalBranchQuota(options_.eval_branch_quota);
     var flat_nodes = parseNodes(fmt);
     // flat_nodes is a flat list of nodes here.
-    // need to populate for_range.body and for_each.body with
-    // nested nodes.
-    var tree_ = parseTree(flat_nodes);
+    // need to nest range nodes in range / if.
+    var tree_ = parseTree(flat_nodes, &[_]NodeType{});
     var root = tree_.root;
-    // append remaining non root
+    // append remaining non-nested nodes
     if (tree_.len < flat_nodes.len) {
         for (flat_nodes[tree_.len..]) |node|
             root = root ++ [1]Node{node};
@@ -320,7 +356,7 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
             return fbs.getWritten();
         }
 
-        pub const BufPrintError = error{DuplicateKey} || std.io.FixedBufferStream([]u8).WriteError;
+        pub const BufPrintError = error{ DuplicateKey, InvalidConditionType } || std.io.FixedBufferStream([]u8).WriteError;
         fn bufPrintImpl(comptime scopes: []const []const ScopeEntry, comptime nodes: []const Node, writer: anytype, args: anytype) BufPrintError!void {
             comptime var i: comptime_int = 0;
             inline while (i < nodes.len) : (i += 1) {
@@ -423,36 +459,40 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
                             }
                         }
                     },
-                    // .if_ => {
-                    //     const condition = @field(args, node.if_.condition);
-                    //     if (!try empty(condition))
-                    //         try bufPrintImpl(scopes, node.if_.body, writer, args)
-                    //     else if (i + 1 < nodes.len and nodes[i + 1] == .else_) {
-                    //         try bufPrintImpl(scopes, node.if_.body, writer, args);
-                    //         i += 1;
-                    //     }
-                    // },
-                    .end => unreachable,
+                    .if_ => {
+                        const field = node.if_.pipeline.?.cmds[0].field;
+                        const condition = if (@hasField(@TypeOf(args), field)) @field(args, field) else null;
+                        if (!try empty(condition))
+                            try bufPrintImpl(scopes, node.if_.list.?.root, writer, args)
+                        else if (node.if_.else_list) |else_list|
+                            try bufPrintImpl(scopes, else_list.root, writer, args);
+                    },
+                    .else_, .end => unreachable,
                 }
             }
         }
 
+        // TODO: review rules for truthiness
         fn empty(value: anytype) !bool {
             const V = @TypeOf(value);
             const vti = @typeInfo(V);
             return switch (vti) {
+                .Int, .Float, .ComptimeInt, .ComptimeFloat => value == 0,
                 .Pointer => switch (vti.Pointer.size) {
                     .One => empty(value.*),
                     .Slice => value.len == 0,
-                    else => error.UnsupportedType,
+                    else => error.InvalidConditionType,
+                    // other types to consider: .Many, .C
                 },
-                .Optional => value == null,
-                .Bool => value,
+                .Optional => value == null or empty(value.?),
+                .Bool => !value,
                 .Array, .Vector => value.len == 0,
+                .Null => true,
                 else => if (@hasField(V, "len") or @hasDecl(V, "len"))
                     value.len == 0
                 else
-                    error.UnsupportedType,
+                    error.InvalidConditionType,
+                    // other types to consider: .Void, .Struct, .Union, .Enum, .EnumLiteral
             };
         }
 
