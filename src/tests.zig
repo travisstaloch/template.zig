@@ -67,20 +67,21 @@ test "escapes" {
 
 test "variables" {
     {
-        const text = "{{name}}";
+        const text = "{{.name}}";
         const tmpl = Template(text, .{});
         t_expectEqual(tmpl.tree.root.len, 1);
-        expectNode(tmpl.tree.root[0], .action, "name");
+        // expectNode(tmpl.tree.root[0], .action, "name");
         try expectPrinted("zero", tmpl, .{ .name = "zero" });
     }
     {
-        const text = "Hi {{name}} at index #{{index}}";
+        const text = "Hi {{.name}} at index #{{.index}}";
         const tmpl = Template(text, .{});
         t_expectEqual(tmpl.tree.root.len, 4);
         expectNode(tmpl.tree.root[0], .text, "Hi ");
-        expectNode(tmpl.tree.root[1], .action, "name");
+        // expectNode(tmpl.tree.root[1], .action, "name");
+        t.expectEqualStrings("name", tmpl.tree.root[1].action.cmds[0].field);
         expectNode(tmpl.tree.root[2], .text, " at index #");
-        expectNode(tmpl.tree.root[3], .action, "index");
+        t.expectEqualStrings("index", tmpl.tree.root[3].action.cmds[0].field);
         try expectPrinted("Hi zero at index #000", tmpl, .{ .name = "zero", .index = "000" });
     }
 }
@@ -111,14 +112,15 @@ test "range" {
         t.expect(tmpl.tree.root[0] == .range);
         t_expectEqual(tmpl.tree.root[0].range.list.?.len, 8);
         expectNode(tmpl.tree.root[0].range.list.?.root[0], .text, "level1 ");
-        expectNode(tmpl.tree.root[0].range.list.?.root[1], .action, "$index");
+        // expectNode(tmpl.tree.root[0].range.list.?.root[1], .action, "$index");
+        t.expectEqualStrings("$index", tmpl.tree.root[0].range.list.?.root[1].action.cmds[0].identifier);
         t.expect(tmpl.tree.root[0].range.list.?.root[2] == .range);
         t.expectEqualStrings("$index2", tmpl.tree.root[0].range.list.?.root[2].range.pipeline.?.decls[0]);
-        expectNode(tmpl.tree.root[0].range.list.?.root[1], .action, "$index");
+        // expectNode(tmpl.tree.root[0].range.list.?.root[1], .action, "$index");
         t_expectEqual(tmpl.tree.root[0].range.list.?.root[2].range.list.?.root.len, 3);
         expectNode(tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[0], .text, " level2 ");
-        expectNode(tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[1], .action, "$index");
-        expectNode(tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[2], .action, "$index2");
+        t.expectEqualStrings("$index", tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[1].action.cmds[0].identifier);
+        t.expectEqualStrings("$index2", tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[2].action.cmds[0].identifier);
         expectNode(tmpl.tree.root[0].range.list.?.root[3], .text, " endlevel1 ");
         try expectPrinted("level1 0 level2 00 endlevel1 level1 1 level2 10 endlevel1 ", tmpl, .{});
     }
@@ -139,9 +141,9 @@ test "range2" {
         t.expectEqualStrings("list", tmpl.tree.root[0].range.pipeline.?.cmds[0].field);
         t_expectEqual(tmpl.tree.root[0].range.list.?.root.len, 4);
         expectNode(tmpl.tree.root[0].range.list.?.root[0], .text, "\nPrint ");
-        expectNode(tmpl.tree.root[0].range.list.?.root[1], .action, "$item");
+        t.expectEqualStrings("$item", tmpl.tree.root[0].range.list.?.root[1].action.cmds[0].identifier);
+        t.expectEqualStrings("$index", tmpl.tree.root[0].range.list.?.root[3].action.cmds[0].identifier);
         expectNode(tmpl.tree.root[0].range.list.?.root[2], .text, " at ");
-        expectNode(tmpl.tree.root[0].range.list.?.root[3], .action, "$index");
         const list = [_]u8{ 84, 168 };
         try expectPrinted("\nPrint 84 at 0\nPrint 168 at 1", tmpl, .{ .list = list });
     }
@@ -213,6 +215,16 @@ test "multiple templates" {
     try expectPrinted("T2", T2, .{});
 }
 
+test "trim spaces" {
+    const tmpl = Template("{{23 -}} < {{- 45}}", .{});
+    try expectPrinted("23<45", tmpl, .{});
+}
+
+test "constants" {
+    const tmpl = Template("{{-23 -}} < {{- -45}}", .{});
+    try expectPrinted("-23<-45", tmpl, .{});
+}
+
 // --------------------
 // --- readme tests ---
 // --------------------
@@ -221,7 +233,7 @@ var print_buf: [1000]u8 = undefined;
 test "template variables" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
-        "Hello {{world}}",
+        "Hello {{.world}}",
         .{ .eval_branch_quota = 1000 }, // default value. same as .{}
     );
     // bufPrint
@@ -232,6 +244,7 @@ test "template variables" {
     defer std.testing.allocator.free(message2);
     std.testing.expectEqualStrings("Hello again friends", message2);
 }
+
 test "for range loop" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
@@ -246,11 +259,12 @@ test "for range loop" {
     defer std.testing.allocator.free(message2);
     std.testing.expectEqualStrings("5 times: 01234", message2);
 }
+
 test "for each loop" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
         "5 times: {{ range $index, $item := .items }}{{$item}}-{{ $index }},{{ end }}",
-        .{ .eval_branch_quota = 4000 },
+        .{ .eval_branch_quota = 6000 },
     );
     // bufPrint
     const items = [_]u8{ 0, 1, 2, 3, 4 };
@@ -264,7 +278,7 @@ test "for each loop" {
 
 test "if - else if - else" {
     const Tmpl = @import("template.zig").Template;
-    const tmpl = Tmpl("{{if .cond}}a{{else if .cond2}}b{{else}}c{{end}}", .{});
+    const tmpl = Tmpl("{{if .cond}}a{{else if .cond2}}b{{else}}c{{end}}", .{ .eval_branch_quota = 2000 });
     std.testing.expectEqualStrings("a", try tmpl.bufPrint(&print_buf, .{ .cond = true }));
     std.testing.expectEqualStrings("b", try tmpl.bufPrint(&print_buf, .{ .cond2 = 1 }));
     std.testing.expectEqualStrings("c", try tmpl.bufPrint(&print_buf, .{}));

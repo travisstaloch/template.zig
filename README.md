@@ -10,13 +10,12 @@ $ zig build # results in zig-cache/lib/libtemplate.zig.a
 
 from [tests.zig](src/tests.zig)
 ```zig
-
 var print_buf: [1000]u8 = undefined;
 
 test "template variables" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
-        "Hello {{world}}",
+        "Hello {{.world}}",
         .{ .eval_branch_quota = 1000 }, // default value. same as .{}
     );
     // bufPrint
@@ -27,6 +26,7 @@ test "template variables" {
     defer std.testing.allocator.free(message2);
     std.testing.expectEqualStrings("Hello again friends", message2);
 }
+
 test "for range loop" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
@@ -41,11 +41,12 @@ test "for range loop" {
     defer std.testing.allocator.free(message2);
     std.testing.expectEqualStrings("5 times: 01234", message2);
 }
+
 test "for each loop" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
         "5 times: {{ range $index, $item := .items }}{{$item}}-{{ $index }},{{ end }}",
-        .{ .eval_branch_quota = 4000 },
+        .{ .eval_branch_quota = 6000 },
     );
     // bufPrint
     const items = [_]u8{ 0, 1, 2, 3, 4 };
@@ -59,7 +60,7 @@ test "for each loop" {
 
 test "if - else if - else" {
     const Tmpl = @import("template.zig").Template;
-    const tmpl = Tmpl("{{if .cond}}a{{else if .cond2}}b{{else}}c{{end}}", .{});
+    const tmpl = Tmpl("{{if .cond}}a{{else if .cond2}}b{{else}}c{{end}}", .{ .eval_branch_quota = 2000 });
     std.testing.expectEqualStrings("a", try tmpl.bufPrint(&print_buf, .{ .cond = true }));
     std.testing.expectEqualStrings("b", try tmpl.bufPrint(&print_buf, .{ .cond2 = 1 }));
     std.testing.expectEqualStrings("c", try tmpl.bufPrint(&print_buf, .{}));

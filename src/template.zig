@@ -4,10 +4,13 @@ const mem = std.mem;
 // TODO: wrap in node type with fields next and node?
 // think more about how pipelines work
 
-pub const NodeType = enum { text, action, range, end, if_, else_ };
+pub const NodeType = enum { text, action, range, end, if_, else_ //, comment, template, block, with
+};
 pub const Node = union(NodeType) {
     text: []const u8,
-    action: []const u8, // TODO: is action the correct name for this field?
+    /// something bounded by delimiters
+    /// action represents simple field evaluations and parenthesized pipelines.
+    action: Pipeline,
     range: Branch,
     if_: Branch,
     else_,
@@ -20,7 +23,7 @@ pub const Node = union(NodeType) {
     pub const List = struct {
         len: usize,
         root: []const Node,
-        pub fn format(value: List, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) FormatError!void {
+        pub fn format(value: List, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
             try writer.print("{}", .{value.root});
         }
     };
@@ -31,18 +34,20 @@ pub const Node = union(NodeType) {
     };
     pub const CommandType = enum { identifier, field, constant, range };
     pub const Command = union(CommandType) {
-        identifier: []const u8,
-        field: []const u8,
-        constant: []const u8,
-        range: struct { start: usize, end: usize },
+        identifier: []const u8, // TODO: support chained identifiers ($id.field1.field2...)
+        field: []const u8, // TODO: support chained fields (.field1.field2...)
+        constant: []const u8, // TODO: add different constant types
+        range: struct { start: usize, end: usize }, // TODO: rename to avoid naming conflict with Node.range
         // Arguments in lexical order: Identifier, field, or constant.
     };
 
-    const FormatError = error{ DiskQuota, FileTooBig, InputOutput, NoSpaceLeft, AccessDenied, BrokenPipe, SystemResources, OperationAborted, NotOpenForWriting, WouldBlock, Unexpected };
-    pub fn format(value: Node, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) FormatError!void {
+    // const FormatError = error{ DiskQuota, FileTooBig, InputOutput, NoSpaceLeft, AccessDenied, BrokenPipe, SystemResources, OperationAborted, NotOpenForWriting, WouldBlock, Unexpected };
+    pub fn format(value: Node, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         switch (value) {
             .text => try writer.print("'{s}'", .{value.text}),
-            .action => try writer.print("'{{{{{s}}}}}'", .{value.action}),
+            .action => {
+                try writer.print("'{{{{{}}}}}'", .{value.action});
+            },
             .range => {
                 try writer.print("range {}", .{value.range.pipeline});
                 // for (value.range.body) |child| try writer.print("  {}", .{child});
@@ -107,16 +112,17 @@ pub const Parser = struct {
     }
 
     /// Returns the n-th next character or null if that's past the end
-    pub fn peek(self: *@This(), comptime n: usize) ?u8 {
-        return if (self.pos + n < self.buf.len) self.buf[self.pos + n] else null;
+    pub fn peek(self: *@This(), comptime n: comptime_int) ?u8 {
+        const signed_pos = @as(isize, self.pos);
+        return if (signed_pos + n < self.buf.len) self.buf[signed_pos + n] else null;
     }
 
-    /// end of stream?
+    /// end of stream
     pub fn eos(self: @This()) bool {
         return self.pos >= self.buf.len;
     }
 
-    /// sets marked_pos to the current pos + n
+    /// sets `marked_pos` to `current pos + n`
     pub fn mark(self: *@This(), comptime n: usize) void {
         self.marked_pos = self.pos + n;
     }
@@ -140,7 +146,7 @@ inline fn escape(comptime input: []const u8) []u8 {
 }
 
 fn todo(comptime msg: []const u8, args: anytype) noreturn {
-    showError("TODO: " ++ msg, args);
+    comptime showError("TODO: " ++ msg, args);
 }
 
 // identifier | field | constant | range
@@ -152,9 +158,10 @@ fn parseCommand(comptime input: []const u8) Node.Command {
     }
     return switch (input[0]) {
         '.' => .{ .field = input[1..] },
-        'a'...'z', 'A'...'Z' => .{ .identifier = input },
-        // '0'...'9', '-' => .{ .constant = std.fmt.parseInt(usize, input[0..dots_idx], 10) catch |e| showError("invalid constant value '{}'. {s}", .{ input[0..dots_idx], @errorName(e) }) },
-        else => todo("parseCommand: unsupported command type {s}", .{input}),
+        'a'...'z', 'A'...'Z', '$' => .{ .identifier = input }, // TODO: verify first char is '$'
+        '0'...'9', '-' => .{ .constant = input }, // TODO: add different constant types
+
+        else => todo("parseCommand: unsupported command type '{s}'", .{input}),
     };
 }
 
@@ -163,7 +170,7 @@ fn parseCommand(comptime input: []const u8) Node.Command {
 fn parsePipeline(comptime input: []const u8) Node.Pipeline {
     var result: Node.Pipeline = .{ .is_assign = false, .cmds = &[_]Node.Command{}, .decls = &[_][]const u8{} };
 
-    var parser = Parser{ .buf = trim(input) };
+    var parser = Parser{ .buf = trimSpaces(input) };
     if (std.mem.indexOfScalar(u8, input, '=')) |eqpos_| {
         // @compileLog("eqpos_", eqpos_);
         result.is_assign = true;
@@ -172,7 +179,7 @@ fn parsePipeline(comptime input: []const u8) Node.Pipeline {
         while (parser.pos < eqpos_) {
             // declarations
             // @compileLog(parser.pos, eqpos_, parser.buf.len);
-            var next = trim(parser.untilOneOf(",=:"));
+            var next = trimSpaces(parser.untilOneOf(",=:"));
 
             // @compileLog(next);
             if (next.len == 0) break;
@@ -188,7 +195,7 @@ fn parsePipeline(comptime input: []const u8) Node.Pipeline {
     // @compileLog(parser.pos);
     // commands
     while (true) {
-        var cmd_text = trim(parser.until('|'));
+        var cmd_text = trimSpaces(parser.until('|'));
         // @compileLog(cmd_text);
         if (cmd_text.len == 0) break;
         result.cmds = result.cmds ++ [1]Node.Command{parseCommand(cmd_text)};
@@ -209,39 +216,92 @@ fn parseIf(comptime input: []const u8) Node {
 }
 
 /// trim trailing and leading whitespace
-fn trim(s_: []const u8) []const u8 {
-    if (s_.len == 0) return s_;
-    var s = s_;
-    while (mem.indexOfScalar(u8, &std.ascii.spaces, s[0])) |_|
-        s = s[1..];
-    while (mem.indexOfScalar(u8, &std.ascii.spaces, s[s.len - 1])) |_|
-        s.len -= 1;
-    return s;
+fn trimSpaces(comptime input: []const u8) []const u8 {
+    return @call(.{ .modifier = .always_inline }, trim, .{ input, &std.ascii.spaces });
+}
+
+/// trim leading whitespace
+fn trimSpacesLeft(comptime input: []const u8) []const u8 {
+    return @call(.{ .modifier = .always_inline }, trimLeft, .{ input, &std.ascii.spaces });
+}
+
+/// trim trailing whitespace
+fn trimSpacesRight(comptime input: []const u8) []const u8 {
+    return @call(.{ .modifier = .always_inline }, trimRight, .{ input, &std.ascii.spaces });
+}
+
+fn trim(comptime input: []const u8, comptime trim_chars: []const u8) []const u8 {
+    if (input.len == 0) return input;
+    var start: usize = 0;
+    while (mem.indexOfScalar(u8, trim_chars, input[start])) |_|
+        start += 1;
+    var end: usize = input.len;
+    while (mem.indexOfScalar(u8, trim_chars, input[end - 1])) |_|
+        end -= 1;
+    return input[start..end];
+}
+
+fn trimLeft(comptime input: []const u8, comptime trim_chars: []const u8) []const u8 {
+    if (input.len == 0) return input;
+    var start: usize = 0;
+    while (mem.indexOfScalar(u8, trim_chars, input[start])) |_|
+        start += 1;
+    return input[start..];
+}
+
+fn trimRight(comptime input: []const u8, comptime trim_chars: []const u8) []const u8 {
+    if (input.len == 0) return input;
+    var end: usize = input.len;
+    while (mem.indexOfScalar(u8, trim_chars, input[end - 1])) |_|
+        end -= 1;
+    return input[0..end];
 }
 
 inline fn parseNodes(comptime fmt: []const u8) []const Node {
     var nodes: []const Node = &[0]Node{};
     var parser = Parser{ .buf = fmt };
-
+    var trim_right = false;
+    var trim_left = false;
     while (!parser.eos()) : (parser.pos += 1) {
         const c = parser.peek(0) orelse break;
         switch (c) {
             '{' => {
                 const next = parser.peek(1) orelse break;
                 if (next != '{') continue;
-                const lit = parser.fromMark();
+                var lit = parser.fromMark();
+                if (nodes.len > 0) {
+                    if (parser.peek(2)) |c2| {
+                        if (parser.peek(3)) |c3| {
+                            if (c2 == '-' and c3 == ' ') { // make sure '-' is followed by space too
+                                lit = trimSpacesRight(lit);
+                                trim_left = true;
+                            }
+                        }
+                    }
+                }
+                if (trim_right) {
+                    lit = trimSpacesLeft(lit);
+                    trim_right = false;
+                }
 
                 if (lit.len != 0)
-                    nodes = nodes ++ [1]Node{@unionInit(Node, "text", escape(lit))};
+                    nodes = nodes ++ [1]Node{.{ .text = escape(lit) }};
                 parser.mark(2);
                 parser.pos += 1;
             },
             '}' => {
                 const next = parser.peek(1) orelse break;
                 if (next != c) continue;
+                trim_right = if (parser.peek(-1)) |c2| if (parser.peek(-2)) |c3| c2 == '-' and c3 == ' ';
                 var action = parser.fromMark();
                 if (action.len != 0) {
-                    action = trim(action);
+                    if (trim_right) action = action[0 .. action.len - 1]; // remove the '-'
+                    if (trim_left) {
+                        action = action[1..]; // remove the '-'
+                        trim_left = false;
+                    }
+
+                    action = trimSpaces(action);
                     if (mem.startsWith(u8, action, "range")) {
                         nodes = nodes ++ [1]Node{parseRange(escape(action))};
                     } else if (mem.startsWith(u8, action, "if")) {
@@ -257,7 +317,7 @@ inline fn parseNodes(comptime fmt: []const u8) []const Node {
                     } else if (memeql(action, "end"))
                         nodes = nodes ++ [1]Node{.end}
                     else
-                        nodes = nodes ++ [1]Node{.{ .action = escape(action) }};
+                        nodes = nodes ++ [1]Node{.{ .action = parsePipeline(escape(action)) }};
                 }
                 parser.mark(2);
                 parser.pos += 1;
@@ -271,7 +331,7 @@ inline fn parseNodes(comptime fmt: []const u8) []const Node {
     }
     return nodes;
 }
-/// recursively appends children of range loops to their bodies
+/// recursively appends children of range/ifs to their lists
 /// until end action reached
 fn parseTree(comptime flat_nodes: []const Node, comptime stop_types: []const NodeType) Node.List {
     var result: []const Node = &[0]Node{};
@@ -297,7 +357,6 @@ fn parseTree(comptime flat_nodes: []const Node, comptime stop_types: []const Nod
                         i += list.len;
                 }
                 if (i < flat_nodes.len and flat_nodes[i] == .else_) {
-                    // @compileLog("else", flat_nodes[i]);
                     i += 1;
                     const list = parseTree(flat_nodes[i..], &[_]NodeType{.end});
                     node.if_.else_list = list;
@@ -327,7 +386,7 @@ fn parseTree(comptime flat_nodes: []const Node, comptime stop_types: []const Nod
 // }
 
 const Options = struct {
-    eval_branch_quota: usize = 1050,
+    eval_branch_quota: usize = 2000,
     name: ?[]const u8 = null,
 };
 pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
@@ -368,19 +427,26 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
                 switch (node) {
                     .text => _ = try writer.write(node.text),
                     .action => {
-                        if (@hasField(@TypeOf(args), node.action)) {
-                            _ = try writer.write(@field(args, node.action));
-                        } else {
-                            // search scopes
-                            inline for (scopes) |scope| {
-                                inline for (scope) |entry| {
-                                    // std.debug.print("searching scopes for '{s}' action '{s}'\n", .{ entry.key, node.action });
-                                    if (memeql(entry.key, node.action)) {
-                                        // std.debug.print("found scope entry {s} {}\n", .{ entry.key, entry.value });
-                                        _ = try writer.print("{}", .{entry.value});
+                        // fn evalCommand
+                        const first_word = node.action.cmds[0];
+                        switch (first_word) {
+                            .field => if (@hasField(@TypeOf(args), first_word.field)) {
+                                _ = try writer.write(@field(args, first_word.field));
+                            },
+                            .constant => _ = try writer.write(first_word.constant),
+                            .identifier => {
+                                // search scopes
+                                inline for (scopes) |scope| {
+                                    inline for (scope) |entry| {
+                                        // std.debug.print("searching scopes for '{s}' action '{s}'\n", .{ entry.key, node.action });
+                                        if (memeql(entry.key, first_word.identifier)) {
+                                            // std.debug.print("found scope entry {s} {}\n", .{ entry.key, entry.value });
+                                            _ = try writer.print("{}", .{entry.value});
+                                        }
                                     }
                                 }
-                            }
+                            },
+                            .range => unreachable,
                         }
                     },
                     .range => {
