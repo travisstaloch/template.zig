@@ -97,8 +97,8 @@ test "range" {
         t_expectEqual(tmpl.tree.root[0].range.pipeline.?.decls.len, 2);
         t.expectEqualStrings(tmpl.tree.root[0].range.pipeline.?.decls[0], "$i");
         t.expectEqualStrings(tmpl.tree.root[0].range.pipeline.?.decls[1], "$e");
-        t_expectEqual(tmpl.tree.root[0].range.pipeline.?.cmds[0].range.start, 1);
-        t_expectEqual(tmpl.tree.root[0].range.pipeline.?.cmds[0].range.end, 2);
+        t_expectEqual(tmpl.tree.root[0].range.pipeline.?.cmds[0].interval.start, 1);
+        t_expectEqual(tmpl.tree.root[0].range.pipeline.?.cmds[0].interval.end, 2);
         t_expectEqual(tmpl.tree.root[0].range.list.?.len, 5);
         try expectPrinted(" a 0:1 b  a 1:2 b  c", tmpl, .{});
     }
@@ -296,11 +296,11 @@ test "template variables" {
     std.testing.expectEqualStrings("Hello again friends", message2);
 }
 
-test "for range loop" {
+test "range over interval" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
         "5 times: {{ range $index := 0..4 }}{{ $index }}{{ end }}",
-        .{ .eval_branch_quota = 4000 },
+        .{ .eval_branch_quota = 4000 }, // slightly bigger quota required
     );
     // bufPrint
     const message = try tmpl.bufPrint(&print_buf, .{});
@@ -311,20 +311,20 @@ test "for range loop" {
     std.testing.expectEqualStrings("5 times: 01234", message2);
 }
 
-test "for each loop" {
+test "range over collection with index" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
-        "5 times: {{ range $index, $item := .items }}{{$item}}-{{ $index }},{{ end }}",
+        "5 times: {{ range $index, $item := .items }}{{$item}}{{ $index }},{{ end }}",
         .{ .eval_branch_quota = 6000 },
     );
     // bufPrint
     const items = [_]u8{ 0, 1, 2, 3, 4 };
     const message = try tmpl.bufPrint(&print_buf, .{ .items = items });
-    std.testing.expectEqualStrings("5 times: 0-0,1-1,2-2,3-3,4-4,", message);
+    std.testing.expectEqualStrings("5 times: 00,11,22,33,44,", message);
     // allocPrint
     const message2 = try tmpl.allocPrint(std.testing.allocator, .{ .items = items });
     defer std.testing.allocator.free(message2);
-    std.testing.expectEqualStrings("5 times: 0-0,1-1,2-2,3-3,4-4,", message2);
+    std.testing.expectEqualStrings("5 times: 00,11,22,33,44,", message2);
 }
 
 test "if - else if - else" {

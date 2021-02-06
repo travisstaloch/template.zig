@@ -27,7 +27,7 @@ test "template variables" {
     std.testing.expectEqualStrings("Hello again friends", message2);
 }
 
-test "for range loop" {
+test "range over interval" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
         "5 times: {{ range $index := 0..4 }}{{ $index }}{{ end }}",
@@ -42,20 +42,20 @@ test "for range loop" {
     std.testing.expectEqualStrings("5 times: 01234", message2);
 }
 
-test "for each loop" {
+test "range over collection with index" {
     const Tmpl = @import("template.zig").Template;
     const tmpl = Tmpl(
-        "5 times: {{ range $index, $item := .items }}{{$item}}-{{ $index }},{{ end }}",
+        "5 times: {{ range $index, $item := .items }}{{$item}}{{ $index }},{{ end }}",
         .{ .eval_branch_quota = 6000 },
     );
     // bufPrint
     const items = [_]u8{ 0, 1, 2, 3, 4 };
     const message = try tmpl.bufPrint(&print_buf, .{ .items = items });
-    std.testing.expectEqualStrings("5 times: 0-0,1-1,2-2,3-3,4-4,", message);
+    std.testing.expectEqualStrings("5 times: 00,11,22,33,44,", message);
     // allocPrint
     const message2 = try tmpl.allocPrint(std.testing.allocator, .{ .items = items });
     defer std.testing.allocator.free(message2);
-    std.testing.expectEqualStrings("5 times: 0-0,1-1,2-2,3-3,4-4,", message2);
+    std.testing.expectEqualStrings("5 times: 00,11,22,33,44,", message2);
 }
 
 test "if - else if - else" {

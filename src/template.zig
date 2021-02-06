@@ -31,13 +31,13 @@ pub const Node = union(NodeType) {
         decls: []const []const u8, // Variables in lexical order.
         cmds: []const Command, // The commands in lexical order.
     };
-    pub const CommandType = enum { variable, func, field, constant, range };
+    pub const CommandType = enum { variable, func, field, constant, interval };
     pub const Command = union(CommandType) {
         variable: []const u8, // TODO: support chained variables ($id.field1.field2...)
         func: []const []const u8, // TODO: support chained funcs (func1.field1.field2...)
         field: []const u8, // TODO: support chained fields (.field1.field2...)
         constant: []const u8, // TODO: add different constant types
-        range: struct { start: usize, end: usize }, // TODO: rename to avoid naming conflict with Node.range
+        interval: struct { start: usize, end: usize },
         // Arguments in lexical order: Identifier, field, or constant.
     };
 
@@ -196,12 +196,12 @@ fn parseIdentifier(comptime input: []const u8) []const []const u8 {
     while (it.next()) |part| result = result ++ [1][]const u8{trimSpaces(part)};
     return result;
 }
-// func | variable | field | constant | range
+// func | variable | field | constant | interval
 fn parseCommand(comptime input: []const u8) Node.Command {
     if (std.mem.indexOf(u8, input, "..")) |dots_idx| {
         const start = std.fmt.parseUnsigned(usize, input[0..dots_idx], 10) catch |e| showError("invalid range start '{}'. {s}", .{ input[0..dots_idx], @errorName(e) });
         const end = std.fmt.parseUnsigned(usize, input[dots_idx + 2 ..], 10) catch |e| showError("invalid range end '{}'. {s}", .{ input[0..dots_idx], @errorName(e) });
-        return .{ .range = .{ .start = start, .end = end } };
+        return .{ .interval = .{ .start = start, .end = end } };
     }
     return switch (input[0]) {
         '.' => .{ .field = input[1..] },
@@ -355,6 +355,7 @@ fn parseTree(comptime flat_nodes: []const Node, comptime stop_types: []const Nod
                 node.range.list = list;
                 if (list.len > 0)
                     i += list.len;
+                // TODO: support range else list
             },
             .if_ => {
                 {
@@ -503,19 +504,19 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
                                     }
                                 }
                             },
-                            .range => unreachable,
+                            .interval => unreachable,
                         }
                     },
                     .range => {
                         if (node.range.pipeline) |pipeline| {
                             if (pipeline.is_assign and pipeline.decls.len == 2) {
                                 std.debug.assert(pipeline.cmds.len == 1);
-                                if (pipeline.cmds[0] == .range) {
+                                if (pipeline.cmds[0] == .interval) {
                                     const idx_name = pipeline.decls[0];
                                     const item_name = pipeline.decls[1];
-                                    comptime var item = pipeline.cmds[0].range.start;
+                                    comptime var item = pipeline.cmds[0].interval.start;
                                     comptime var index: usize = 0;
-                                    inline while (item <= pipeline.cmds[0].range.end) : ({
+                                    inline while (item <= pipeline.cmds[0].interval.end) : ({
                                         item += 1;
                                         index += 1;
                                     }) {
@@ -550,10 +551,10 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
                                 } else showError("unsupported range command", .{});
                             } else {
                                 std.debug.assert(pipeline.cmds.len == 1);
-                                if (pipeline.cmds[0] == .range) {
+                                if (pipeline.cmds[0] == .interval) {
                                     const item_name = pipeline.decls[0];
-                                    comptime var item = pipeline.cmds[0].range.start;
-                                    inline while (item <= pipeline.cmds[0].range.end) : ({
+                                    comptime var item = pipeline.cmds[0].interval.start;
+                                    inline while (item <= pipeline.cmds[0].interval.end) : ({
                                         item += 1;
                                     }) {
                                         // std.debug.print("item {} index {}\n", .{ item, index });
