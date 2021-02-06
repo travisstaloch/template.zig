@@ -1,0 +1,13 @@
+pkgs:
+  template:
+    version: 0.0.0
+    description: "comptime templates"
+    license: MIT
+    source_url: "https://github.com/travisstaloch/template.zig"
+    tags:
+
+    root: src/template.zig
+    files:
+      README.md
+      LICENSE
+      src/tests.zig
