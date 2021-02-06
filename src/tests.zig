@@ -225,6 +225,14 @@ test "constants" {
     try expectPrinted("-23<-45", tmpl, .{});
 }
 
+test "pipe" {
+    const tmpl = Template("{{.field1 | .field2}}", .{});
+    t.expect(tmpl.tree.root[0].action.cmds.len == 2);
+    t.expectEqualStrings("field1", tmpl.tree.root[0].action.cmds[0].field);
+    t.expectEqualStrings("field2", tmpl.tree.root[0].action.cmds[1].field);
+    try expectPrinted("value2", tmpl, .{ .field1 = .{ .field2 = "value2" } });
+}
+
 // --------------------
 // --- readme tests ---
 // --------------------

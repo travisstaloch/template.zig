@@ -13,3 +13,5 @@
 - {{.field}} in range
 - working scopes (detect duplicate keys)
 - {{if .cond}} a {{else if .cond2}} b {{else}} c {{end}}
+- {{- }} and {{ -}} to trim whitespace before / after an action
+- initial pipes - only working for fields {{.field1 | .field2}}

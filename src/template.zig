@@ -71,7 +71,6 @@ pub const Parser = struct {
     /// and ending where `ch` is found or until the end if not found
     pub fn until(self: *@This(), comptime ch: u8) []const u8 {
         const start = self.pos;
-
         if (start >= self.buf.len)
             return &[_]u8{};
 
@@ -169,7 +168,6 @@ fn parseCommand(comptime input: []const u8) Node.Command {
 //	declarations? command ('|' command)*
 fn parsePipeline(comptime input: []const u8) Node.Pipeline {
     var result: Node.Pipeline = .{ .is_assign = false, .cmds = &[_]Node.Command{}, .decls = &[_][]const u8{} };
-
     var parser = Parser{ .buf = trimSpaces(input) };
     if (std.mem.indexOfScalar(u8, input, '=')) |eqpos_| {
         // @compileLog("eqpos_", eqpos_);
@@ -192,13 +190,16 @@ fn parsePipeline(comptime input: []const u8) Node.Pipeline {
         }
         parser.pos += 1;
     }
-    // @compileLog(parser.pos);
     // commands
+    // @compileLog(parser.pos);
     while (true) {
+        // @compileLog(parser.pos);
         var cmd_text = trimSpaces(parser.until('|'));
-        // @compileLog(cmd_text);
+        // @compileLog(parser.pos);
+        // @compileError(cmd_text);
         if (cmd_text.len == 0) break;
         result.cmds = result.cmds ++ [1]Node.Command{parseCommand(cmd_text)};
+        parser.pos += 1; // skip '|'
     }
     return result;
 }
@@ -415,6 +416,37 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
             return fbs.getWritten();
         }
 
+        fn writeNestedCmdFields(comptime cmds: []const Node.Command, writer: anytype, args: anytype) !void {
+            std.debug.assert(cmds.len > 0);
+            // make a tuple of all the nested types in args
+            //   example - cmds: ".field1.field2"
+            //   types[0] = @TypeOf(args)
+            //   types[1] = @TypeOf(@field(args, "field1"))
+            //   types[2] = @TypeOf(@field(@field(args, "field1"), "field2"))
+            comptime var types: []const type = &[_]type{@TypeOf(args)};
+            inline for (cmds) |cmd, cmdi| {
+                std.debug.assert(cmd == .field);
+                comptime var dummy: types[cmdi] = undefined;
+                types = types ++ [_]type{@TypeOf(@field(dummy, cmd.field))};
+                // TODO: support functions
+            }
+            const Tuple = std.meta.Tuple(types);
+            var tuple: Tuple = undefined;
+
+            // assign nested values until we find one to write
+            tuple[0] = args;
+            inline for (std.meta.fields(Tuple)[1..]) |f, fi| {
+                const field = @field(tuple[fi], cmds[fi].field);
+                // TODO:
+                if (@typeInfo(@TypeOf(field)) == .Struct) {
+                    tuple[fi + 1] = field;
+                } else {
+                    _ = try writer.write(field);
+                    break;
+                }
+            }
+        }
+
         pub const BufPrintError = error{ DuplicateKey, InvalidConditionType } || std.io.FixedBufferStream([]u8).WriteError;
         fn bufPrintImpl(comptime scopes: []const []const ScopeEntry, comptime nodes: []const Node, writer: anytype, args: anytype) BufPrintError!void {
             comptime var i: comptime_int = 0;
@@ -428,18 +460,20 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
                     .text => _ = try writer.write(node.text),
                     .action => {
                         // fn evalCommand
-                        const first_word = node.action.cmds[0];
-                        switch (first_word) {
-                            .field => if (@hasField(@TypeOf(args), first_word.field)) {
-                                _ = try writer.write(@field(args, first_word.field));
-                            },
-                            .constant => _ = try writer.write(first_word.constant),
+                        if (node.action.cmds.len == 0 and node.action.decls.len == 0) @compileError("no commands or declarations present");
+                        if (node.action.decls.len != 0) todo("support action.decls", .{});
+                        if (node.action.cmds.len == 0) @compileError("action with no commands");
+
+                        const first_cmd = node.action.cmds[0];
+                        switch (first_cmd) {
+                            .field => try writeNestedCmdFields(node.action.cmds, writer, args),
+                            .constant => _ = try writer.write(first_cmd.constant),
                             .identifier => {
                                 // search scopes
                                 inline for (scopes) |scope| {
                                     inline for (scope) |entry| {
                                         // std.debug.print("searching scopes for '{s}' action '{s}'\n", .{ entry.key, node.action });
-                                        if (memeql(entry.key, first_word.identifier)) {
+                                        if (memeql(entry.key, first_cmd.identifier)) {
                                             // std.debug.print("found scope entry {s} {}\n", .{ entry.key, entry.value });
                                             _ = try writer.print("{}", .{entry.value});
                                         }
