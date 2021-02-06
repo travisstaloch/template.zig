@@ -8,6 +8,7 @@
 - i'd build control flow on a stack pattern
   translate the template into IR and execute the IR
 - range else
+- unicode support
 
 ## DONE: 
 - {{.field}} in range

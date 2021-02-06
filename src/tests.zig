@@ -113,14 +113,14 @@ test "range" {
         t_expectEqual(tmpl.tree.root[0].range.list.?.len, 8);
         expectNode(tmpl.tree.root[0].range.list.?.root[0], .text, "level1 ");
         // expectNode(tmpl.tree.root[0].range.list.?.root[1], .action, "$index");
-        t.expectEqualStrings("$index", tmpl.tree.root[0].range.list.?.root[1].action.cmds[0].identifier);
+        t.expectEqualStrings("$index", tmpl.tree.root[0].range.list.?.root[1].action.cmds[0].variable);
         t.expect(tmpl.tree.root[0].range.list.?.root[2] == .range);
         t.expectEqualStrings("$index2", tmpl.tree.root[0].range.list.?.root[2].range.pipeline.?.decls[0]);
         // expectNode(tmpl.tree.root[0].range.list.?.root[1], .action, "$index");
         t_expectEqual(tmpl.tree.root[0].range.list.?.root[2].range.list.?.root.len, 3);
         expectNode(tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[0], .text, " level2 ");
-        t.expectEqualStrings("$index", tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[1].action.cmds[0].identifier);
-        t.expectEqualStrings("$index2", tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[2].action.cmds[0].identifier);
+        t.expectEqualStrings("$index", tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[1].action.cmds[0].variable);
+        t.expectEqualStrings("$index2", tmpl.tree.root[0].range.list.?.root[2].range.list.?.root[2].action.cmds[0].variable);
         expectNode(tmpl.tree.root[0].range.list.?.root[3], .text, " endlevel1 ");
         try expectPrinted("level1 0 level2 00 endlevel1 level1 1 level2 10 endlevel1 ", tmpl, .{});
     }
@@ -141,8 +141,8 @@ test "range2" {
         t.expectEqualStrings("list", tmpl.tree.root[0].range.pipeline.?.cmds[0].field);
         t_expectEqual(tmpl.tree.root[0].range.list.?.root.len, 4);
         expectNode(tmpl.tree.root[0].range.list.?.root[0], .text, "\nPrint ");
-        t.expectEqualStrings("$item", tmpl.tree.root[0].range.list.?.root[1].action.cmds[0].identifier);
-        t.expectEqualStrings("$index", tmpl.tree.root[0].range.list.?.root[3].action.cmds[0].identifier);
+        t.expectEqualStrings("$item", tmpl.tree.root[0].range.list.?.root[1].action.cmds[0].variable);
+        t.expectEqualStrings("$index", tmpl.tree.root[0].range.list.?.root[3].action.cmds[0].variable);
         expectNode(tmpl.tree.root[0].range.list.?.root[2], .text, " at ");
         const list = [_]u8{ 84, 168 };
         try expectPrinted("\nPrint 84 at 0\nPrint 168 at 1", tmpl, .{ .list = list });
@@ -231,6 +231,49 @@ test "pipe" {
     t.expectEqualStrings("field1", tmpl.tree.root[0].action.cmds[0].field);
     t.expectEqualStrings("field2", tmpl.tree.root[0].action.cmds[1].field);
     try expectPrinted("value2", tmpl, .{ .field1 = .{ .field2 = "value2" } });
+}
+
+fn testfunc1() []const u8 {
+    return "func1value";
+}
+
+test "function" {
+    const tmpl = Template("{{func1}}", .{});
+    t.expect(tmpl.tree.root[0].action.cmds.len == 1);
+    t.expectEqualStrings("func1", tmpl.tree.root[0].action.cmds[0].func[0]);
+    // struct instance
+    try expectPrinted("func1value", tmpl, struct {
+        pub fn func1(self: @This()) []const u8 {
+            return "func1value";
+        }
+    }{});
+}
+
+test "pipe function" {
+    const tmpl = Template("{{.field1 | func1}}", .{});
+    t.expect(tmpl.tree.root[0].action.cmds.len == 2);
+    t.expectEqualStrings("field1", tmpl.tree.root[0].action.cmds[0].field);
+    t.expectEqualStrings("func1", tmpl.tree.root[0].action.cmds[1].func[0]);
+    // struct instance
+    try expectPrinted("func1value", tmpl, .{
+        .field1 = struct {
+            pub fn func1(self: @This()) []const u8 {
+                return "func1value";
+            }
+        }{},
+    });
+    // tuple with 'lambda' field
+    try expectPrinted("func1value", tmpl, .{
+        .field1 = .{
+            .func1 = struct {
+                pub fn func1() []const u8 {
+                    return "func1value";
+                }
+            }.func1,
+        },
+    });
+    // tuple with external func field
+    try expectPrinted("func1value", tmpl, .{ .field1 = .{ .func1 = testfunc1 } });
 }
 
 // --------------------

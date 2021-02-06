@@ -1,10 +1,9 @@
 const std = @import("std");
 const mem = std.mem;
 
-// TODO: wrap in node type with fields next and node?
-// think more about how pipelines work
-
-pub const NodeType = enum { text, action, range, end, if_, else_ //, comment, template, block, with
+pub const NodeType = enum {
+    text, action, range, if_, else_, end
+    //, comment, template, block, with
 };
 pub const Node = union(NodeType) {
     text: []const u8,
@@ -32,9 +31,10 @@ pub const Node = union(NodeType) {
         decls: []const []const u8, // Variables in lexical order.
         cmds: []const Command, // The commands in lexical order.
     };
-    pub const CommandType = enum { identifier, field, constant, range };
+    pub const CommandType = enum { variable, func, field, constant, range };
     pub const Command = union(CommandType) {
-        identifier: []const u8, // TODO: support chained identifiers ($id.field1.field2...)
+        variable: []const u8, // TODO: support chained variables ($id.field1.field2...)
+        func: []const []const u8, // TODO: support chained funcs (func1.field1.field2...)
         field: []const u8, // TODO: support chained fields (.field1.field2...)
         constant: []const u8, // TODO: add different constant types
         range: struct { start: usize, end: usize }, // TODO: rename to avoid naming conflict with Node.range
@@ -133,10 +133,6 @@ pub const Parser = struct {
     }
 };
 
-fn showError(comptime msg: []const u8, args: anytype) noreturn {
-    @compileError(std.fmt.comptimePrint(msg, args));
-}
-
 inline fn escape(comptime input: []const u8) []u8 {
     var output = [1]u8{0} ** input.len;
     const n1 = mem.replace(u8, input, "\\{", "{", &output);
@@ -144,11 +140,63 @@ inline fn escape(comptime input: []const u8) []u8 {
     return output[0 .. input.len - (n1 + n2)];
 }
 
+/// trim trailing and leading whitespace
+fn trimSpaces(comptime input: []const u8) []const u8 {
+    return @call(.{ .modifier = .always_inline }, trim, .{ input, &std.ascii.spaces });
+}
+
+/// trim leading whitespace
+fn trimSpacesLeft(comptime input: []const u8) []const u8 {
+    return @call(.{ .modifier = .always_inline }, trimLeft, .{ input, &std.ascii.spaces });
+}
+
+/// trim trailing whitespace
+fn trimSpacesRight(comptime input: []const u8) []const u8 {
+    return @call(.{ .modifier = .always_inline }, trimRight, .{ input, &std.ascii.spaces });
+}
+
+fn trim(comptime input: []const u8, comptime trim_chars: []const u8) []const u8 {
+    if (input.len == 0) return input;
+    var start: usize = 0;
+    while (mem.indexOfScalar(u8, trim_chars, input[start])) |_|
+        start += 1;
+    var end: usize = input.len;
+    while (mem.indexOfScalar(u8, trim_chars, input[end - 1])) |_|
+        end -= 1;
+    return input[start..end];
+}
+
+fn trimLeft(comptime input: []const u8, comptime trim_chars: []const u8) []const u8 {
+    if (input.len == 0) return input;
+    var start: usize = 0;
+    while (mem.indexOfScalar(u8, trim_chars, input[start])) |_|
+        start += 1;
+    return input[start..];
+}
+
+fn trimRight(comptime input: []const u8, comptime trim_chars: []const u8) []const u8 {
+    if (input.len == 0) return input;
+    var end: usize = input.len;
+    while (mem.indexOfScalar(u8, trim_chars, input[end - 1])) |_|
+        end -= 1;
+    return input[0..end];
+}
+
+fn showError(comptime msg: []const u8, args: anytype) noreturn {
+    @compileError(std.fmt.comptimePrint(msg, args));
+}
+
 fn todo(comptime msg: []const u8, args: anytype) noreturn {
     comptime showError("TODO: " ++ msg, args);
 }
 
-// identifier | field | constant | range
+fn parseIdentifier(comptime input: []const u8) []const []const u8 {
+    var result: []const []const u8 = &[0][]const u8{};
+    var it = std.mem.split(input, ".");
+    while (it.next()) |part| result = result ++ [1][]const u8{trimSpaces(part)};
+    return result;
+}
+// func | variable | field | constant | range
 fn parseCommand(comptime input: []const u8) Node.Command {
     if (std.mem.indexOf(u8, input, "..")) |dots_idx| {
         const start = std.fmt.parseUnsigned(usize, input[0..dots_idx], 10) catch |e| showError("invalid range start '{}'. {s}", .{ input[0..dots_idx], @errorName(e) });
@@ -157,7 +205,8 @@ fn parseCommand(comptime input: []const u8) Node.Command {
     }
     return switch (input[0]) {
         '.' => .{ .field = input[1..] },
-        'a'...'z', 'A'...'Z', '$' => .{ .identifier = input }, // TODO: verify first char is '$'
+        'a'...'z', 'A'...'Z' => .{ .func = parseIdentifier(input) },
+        '$' => .{ .variable = input },
         '0'...'9', '-' => .{ .constant = input }, // TODO: add different constant types
 
         else => todo("parseCommand: unsupported command type '{s}'", .{input}),
@@ -216,48 +265,6 @@ fn parseIf(comptime input: []const u8) Node {
     return .{ .if_ = .{ .pipeline = parsePipeline(input[2..]) } };
 }
 
-/// trim trailing and leading whitespace
-fn trimSpaces(comptime input: []const u8) []const u8 {
-    return @call(.{ .modifier = .always_inline }, trim, .{ input, &std.ascii.spaces });
-}
-
-/// trim leading whitespace
-fn trimSpacesLeft(comptime input: []const u8) []const u8 {
-    return @call(.{ .modifier = .always_inline }, trimLeft, .{ input, &std.ascii.spaces });
-}
-
-/// trim trailing whitespace
-fn trimSpacesRight(comptime input: []const u8) []const u8 {
-    return @call(.{ .modifier = .always_inline }, trimRight, .{ input, &std.ascii.spaces });
-}
-
-fn trim(comptime input: []const u8, comptime trim_chars: []const u8) []const u8 {
-    if (input.len == 0) return input;
-    var start: usize = 0;
-    while (mem.indexOfScalar(u8, trim_chars, input[start])) |_|
-        start += 1;
-    var end: usize = input.len;
-    while (mem.indexOfScalar(u8, trim_chars, input[end - 1])) |_|
-        end -= 1;
-    return input[start..end];
-}
-
-fn trimLeft(comptime input: []const u8, comptime trim_chars: []const u8) []const u8 {
-    if (input.len == 0) return input;
-    var start: usize = 0;
-    while (mem.indexOfScalar(u8, trim_chars, input[start])) |_|
-        start += 1;
-    return input[start..];
-}
-
-fn trimRight(comptime input: []const u8, comptime trim_chars: []const u8) []const u8 {
-    if (input.len == 0) return input;
-    var end: usize = input.len;
-    while (mem.indexOfScalar(u8, trim_chars, input[end - 1])) |_|
-        end -= 1;
-    return input[0..end];
-}
-
 inline fn parseNodes(comptime fmt: []const u8) []const Node {
     var nodes: []const Node = &[0]Node{};
     var parser = Parser{ .buf = fmt };
@@ -313,7 +320,7 @@ inline fn parseNodes(comptime fmt: []const u8) []const Node {
                         // as
                         //	{{if a}}_{{else}}{{if b}}_{{end}}{{end}}.
                         nodes = nodes ++ [2]Node{ .else_, parseIf(escape(action[5..])) };
-                    } else if (mem.startsWith(u8, action, "else")) {
+                    } else if (memeql(action, "else")) {
                         nodes = nodes ++ [1]Node{.else_};
                     } else if (memeql(action, "end"))
                         nodes = nodes ++ [1]Node{.end}
@@ -424,27 +431,44 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
             //   types[1] = @TypeOf(@field(args, "field1"))
             //   types[2] = @TypeOf(@field(@field(args, "field1"), "field2"))
             comptime var types: []const type = &[_]type{@TypeOf(args)};
-            inline for (cmds) |cmd, cmdi| {
-                std.debug.assert(cmd == .field);
-                comptime var dummy: types[cmdi] = undefined;
-                types = types ++ [_]type{@TypeOf(@field(dummy, cmd.field))};
-                // TODO: support functions
+            inline for (cmds) |cmd, i| {
+                comptime var dummy: types[i] = undefined;
+                switch (cmd) {
+                    .field => if (@hasField(types[i], cmd.field) or @hasDecl(types[i], cmd.field)) {
+                        types = types ++ [_]type{@TypeOf(@field(dummy, cmd.field))};
+                    } else comptime showError("type {} has no field or public decl '{s}'", .{ types[i], cmd.field }),
+                    .func => if (@hasField(types[i], cmd.func[0]) or @hasDecl(types[i], cmd.func[0])) {
+                        const T = @TypeOf(@field(dummy, cmd.func[0]));
+                        types = types ++ [_]type{T};
+                    } else comptime showError("type {} has no public decl '{s}'", .{ types[i], cmd.func[0] }),
+                    else => todo("support {s} command type", .{std.meta.tagName(cmd)}),
+                }
             }
             const Tuple = std.meta.Tuple(types);
-            var tuple: Tuple = undefined;
+            comptime var tuple: Tuple = undefined;
 
             // assign nested values until we find one to write
             tuple[0] = args;
-            inline for (std.meta.fields(Tuple)[1..]) |f, fi| {
-                const field = @field(tuple[fi], cmds[fi].field);
-                // TODO:
-                if (@typeInfo(@TypeOf(field)) == .Struct) {
-                    tuple[fi + 1] = field;
-                } else {
-                    _ = try writer.write(field);
-                    break;
+            inline for (std.meta.fields(Tuple)[1..]) |_, fi| {
+                const field = switch (cmds[fi]) {
+                    .field => @field(tuple[fi], cmds[fi].field),
+                    // TODO: function arguments
+                    // TODO: support func.fields
+                    .func => @call(.{}, @field(tuple[fi], cmds[fi].func[0]), .{}),
+                    else => todo("unsupported command type {}", .{cmds[fi]}),
+                };
+
+                const ti = @typeInfo(@TypeOf(field));
+                switch (ti) {
+                    .Struct, .Union, .Enum => tuple[fi + 1] = field,
+                    else => {
+                        // TODO: verify field is a string or use another method like print or std.fmt.formatType
+                        _ = try writer.write(field);
+                        break;
+                    },
                 }
             }
+            // std.debug.print("{}\n", .{tuple});
         }
 
         pub const BufPrintError = error{ DuplicateKey, InvalidConditionType } || std.io.FixedBufferStream([]u8).WriteError;
@@ -459,21 +483,20 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
                 switch (node) {
                     .text => _ = try writer.write(node.text),
                     .action => {
-                        // fn evalCommand
                         if (node.action.cmds.len == 0 and node.action.decls.len == 0) @compileError("no commands or declarations present");
                         if (node.action.decls.len != 0) todo("support action.decls", .{});
                         if (node.action.cmds.len == 0) @compileError("action with no commands");
 
                         const first_cmd = node.action.cmds[0];
                         switch (first_cmd) {
-                            .field => try writeNestedCmdFields(node.action.cmds, writer, args),
+                            .field, .func => try writeNestedCmdFields(node.action.cmds, writer, args),
                             .constant => _ = try writer.write(first_cmd.constant),
-                            .identifier => {
+                            .variable => {
                                 // search scopes
                                 inline for (scopes) |scope| {
                                     inline for (scope) |entry| {
                                         // std.debug.print("searching scopes for '{s}' action '{s}'\n", .{ entry.key, node.action });
-                                        if (memeql(entry.key, first_cmd.identifier)) {
+                                        if (memeql(entry.key, first_cmd.variable)) {
                                             // std.debug.print("found scope entry {s} {}\n", .{ entry.key, entry.value });
                                             _ = try writer.print("{}", .{entry.value});
                                         }
@@ -573,6 +596,7 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
         }
 
         // TODO: review rules for truthiness
+        // TODO: support maps
         fn empty(value: anytype) !bool {
             const V = @TypeOf(value);
             const vti = @typeInfo(V);
