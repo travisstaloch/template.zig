@@ -1,19 +1,37 @@
 const std = @import("std");
 const mem = std.mem;
+const lex = @import("lex.zig");
+const Tree = @import("Tree.zig");
 
-pub const NodeType = enum {
-    text, action, range, if_, else_, end
-    //, comment, template, block, with
-};
-pub const Node = union(NodeType) {
+pub const NodeType = std.meta.TagType(Node);
+pub const Node = union(enum) {
     text: []const u8,
     /// something bounded by delimiters
     /// action represents simple field evaluations and parenthesized pipelines.
     action: Pipeline,
     range: Branch,
     if_: Branch,
+    command: Command,
+    identifier: []const []const u8,
     else_,
     end,
+    // err: struct { err: anyerror, message: []const u8 },
+    with: Branch,
+    comment,
+    template: TemplateInternal,
+    field: []const []const u8,
+    chain: Chain,
+    variable: []const []const u8,
+    constant: Constant,
+    pipeline: Pipeline,
+    interval: struct { start: usize, end: usize },
+    dot,
+    // bool: bool,
+    // string: []const u8,
+    // number: []const u8,
+    nil,
+    define: TemplateInternal,
+
     pub const Branch = struct {
         pipeline: ?Pipeline = null,
         list: ?List = null,
@@ -22,42 +40,140 @@ pub const Node = union(NodeType) {
     pub const List = struct {
         len: usize,
         root: []const Node,
-        pub fn format(value: List, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-            try writer.print("{}", .{value.root});
+        pub fn init() List {
+            return .{ .len = 0, .root = &[0]Node{} };
         }
     };
     pub const Pipeline = struct {
         is_assign: bool, // The variables are being assigned, not declared.
         decls: []const []const u8, // Variables in lexical order.
         cmds: []const Command, // The commands in lexical order.
+        pub fn init() Pipeline {
+            return .{ .is_assign = false, .cmds = &[0]Node.Command{}, .decls = &[0][]const u8{} };
+        }
     };
-    pub const CommandType = enum { variable, func, field, constant, interval };
-    pub const Command = union(CommandType) {
-        variable: []const u8, // TODO: support chained variables ($id.field1.field2...)
-        func: []const []const u8, // TODO: support chained funcs (func1.field1.field2...)
-        field: []const u8, // TODO: support chained fields (.field1.field2...)
-        constant: []const u8, // TODO: add different constant types
-        interval: struct { start: usize, end: usize },
-        // Arguments in lexical order: Identifier, field, or constant.
+    pub const Command = struct {
+        args: []const Node,
+    };
+    pub const Chain = struct {
+        node: *const Node,
+        field: []const []const u8,
+    };
+    pub const Constant = union(enum) {
+        int: []const u8,
+        string: []const u8,
+        char: []const u8,
+        bool: []const u8,
+        pub fn payload(self: Constant) []const u8 {
+            return switch (self) {
+                .int => self.int,
+                .string => self.string,
+                .char => self.char,
+                .bool => self.bool,
+            };
+        }
+    };
+    pub const TemplateInternal = struct {
+        name: []const u8,
+        pipeline: ?Pipeline,
     };
 
-    // const FormatError = error{ DiskQuota, FileTooBig, InputOutput, NoSpaceLeft, AccessDenied, BrokenPipe, SystemResources, OperationAborted, NotOpenForWriting, WouldBlock, Unexpected };
-    pub fn format(value: Node, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        switch (value) {
-            .text => try writer.print("'{s}'", .{value.text}),
+    fn formatStringList(strs: []const []const u8, separator: []const u8, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        for (strs) |str, i| {
+            _ = try writer.write(str);
+            if (i != strs.len - 1)
+                _ = try writer.write(separator);
+        }
+    }
+
+    fn formatPipeline(pipeline: Node.Pipeline, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        if (pipeline.decls.len > 0) {
+            for (pipeline.decls) |decl, i| {
+                if (i > 0) _ = try writer.write(", ");
+                _ = try writer.write(decl);
+            }
+            _ = try writer.write(" := ");
+        }
+        for (pipeline.cmds) |cmd, i| {
+            if (i > 0) _ = try writer.write(" | ");
+            try format(.{ .command = cmd }, fmt, options, writer);
+        }
+    }
+
+    fn formatBranch(comptime branch_name: []const u8, branch: Node.Branch, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = try writer.write("{{" ++ branch_name);
+        try formatPipeline(branch.pipeline.?, fmt, options, writer);
+        _ = try writer.write("}}");
+        if (branch.list) |list| for (list.root) |node| try format(node, fmt, options, writer);
+        if (branch.else_list) |list| {
+            _ = try writer.write("{{else}}");
+            for (list.root) |node| try format(node, fmt, options, writer);
+        }
+        _ = try writer.write("{{end}}");
+    }
+
+    pub fn format(node: Node, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void {
+        switch (node) {
+            .text => _ = try writer.write(node.text),
             .action => {
-                try writer.print("'{{{{{}}}}}'", .{value.action});
+                _ = try writer.write("{{");
+                try formatPipeline(node.action, fmt, options, writer);
+                _ = try writer.write("}}");
             },
-            .range => {
-                try writer.print("range {}", .{value.range.pipeline});
-                // for (value.range.body) |child| try writer.print("  {}", .{child});
-                try writer.print("\n  {}", .{value.range.list});
+            .range => try formatBranch("range ", node.range, fmt, options, writer),
+            .with => try formatBranch("with ", node.with, fmt, options, writer),
+            .if_ => try formatBranch("if ", node.if_, fmt, options, writer),
+            .comment => _ = try writer.write("/* comment omitted */"),
+            .field => {
+                _ = try writer.write(".");
+                try formatStringList(node.field, ".", fmt, options, writer);
             },
-            .if_ => {
-                try writer.print("if {}", .{value.if_.pipeline});
-                try writer.print("\n  {}", .{value.if_.list});
+            .variable => try formatStringList(node.variable, ".", fmt, options, writer),
+            .identifier => _ = try formatStringList(node.identifier, ".", fmt, options, writer),
+            .template => {
+                try writer.print("{{{{{s} {s}", .{ @tagName(node), node.template.name });
+                if (node.template.pipeline) |pipeline| {
+                    _ = try writer.writeByte(' ');
+                    try formatPipeline(pipeline, fmt, options, writer);
+                }
+                _ = try writer.write("}}");
             },
-            .end, .else_ => unreachable,
+            .pipeline => try formatPipeline(node.pipeline, fmt, options, writer),
+            .constant => _ = try writer.write(node.constant.payload()),
+            .interval => try writer.print("{}..{}", .{ node.interval.start, node.interval.end }),
+            .dot => _ = try writer.write("."),
+            .end => _ = try writer.write("end"),
+            .else_ => _ = try writer.write("else"),
+            .command => {
+                for (node.command.args) |arg, i| {
+                    if (i > 0) _ = try writer.writeByte(' ');
+                    if (arg == .pipeline) {
+                        _ = try writer.writeByte('(');
+                        try formatPipeline(arg.pipeline, fmt, options, writer);
+                        _ = try writer.writeByte(')');
+                        continue;
+                    }
+                    try writer.print("{}", .{arg});
+                }
+            },
+            .chain => {
+                const n = node.chain.node;
+                if (n.* == .pipeline) {
+                    _ = try writer.writeByte('(');
+                    try formatPipeline(n.pipeline, fmt, options, writer);
+                    _ = try writer.writeByte(')');
+                    // } else try writer.print("{}", .{n.*});
+                } else try format(n.*, fmt, options, writer);
+                if (node.chain.field.len > 0) {
+                    _ = try writer.writeByte('.');
+                    try formatStringList(node.chain.field, ".", fmt, options, writer);
+                }
+            },
+            .nil => _ = try writer.write("nil"),
+            .define => {
+                _ = try writer.write("define ...");
+                @panic("TODO");
+            },
         }
     }
 };
@@ -182,12 +298,17 @@ fn trimRight(comptime input: []const u8, comptime trim_chars: []const u8) []cons
     return input[0..end];
 }
 
-fn showError(comptime msg: []const u8, args: anytype) noreturn {
-    @compileError(std.fmt.comptimePrint(msg, args));
+fn errorNode(comptime msg: []const u8, args: anytype) Node {
+    return .{ .err = std.fmt.comptimePrint(msg, args) };
 }
 
-fn todo(comptime msg: []const u8, args: anytype) noreturn {
-    comptime showError("TODO: " ++ msg, args);
+pub fn todo(comptime msg: []const u8, args: anytype) noreturn {
+    // if (is_comptime)
+    @compileError(std.fmt.comptimePrint("TODO: " ++ msg, args));
+    // else {
+    //     std.log.err("TODO: " ++ msg, args);
+    //     @panic("");
+    // }
 }
 
 fn parseIdentifier(comptime input: []const u8) []const []const u8 {
@@ -196,11 +317,11 @@ fn parseIdentifier(comptime input: []const u8) []const []const u8 {
     while (it.next()) |part| result = result ++ [1][]const u8{trimSpaces(part)};
     return result;
 }
-// func | variable | field | constant | interval
-fn parseCommand(comptime input: []const u8) Node.Command {
+
+fn parseCommand2(comptime input: []const u8) Node.Command {
     if (std.mem.indexOf(u8, input, "..")) |dots_idx| {
-        const start = std.fmt.parseUnsigned(usize, input[0..dots_idx], 10) catch |e| showError("invalid range start '{}'. {s}", .{ input[0..dots_idx], @errorName(e) });
-        const end = std.fmt.parseUnsigned(usize, input[dots_idx + 2 ..], 10) catch |e| showError("invalid range end '{}'. {s}", .{ input[0..dots_idx], @errorName(e) });
+        const start = std.fmt.parseUnsigned(usize, input[0..dots_idx], 10) catch |e| compileError("invalid range start '{}'. {s}", .{ input[0..dots_idx], @errorName(e) });
+        const end = std.fmt.parseUnsigned(usize, input[dots_idx + 2 ..], 10) catch |e| compileError("invalid range end '{}'. {s}", .{ input[0..dots_idx], @errorName(e) });
         return .{ .interval = .{ .start = start, .end = end } };
     }
     return switch (input[0]) {
@@ -213,9 +334,7 @@ fn parseCommand(comptime input: []const u8) Node.Command {
     };
 }
 
-// Pipeline:
-//	declarations? command ('|' command)*
-fn parsePipeline(comptime input: []const u8) Node.Pipeline {
+fn parsePipeline2(comptime input: []const u8) Node.Pipeline {
     var result: Node.Pipeline = .{ .is_assign = false, .cmds = &[_]Node.Command{}, .decls = &[_][]const u8{} };
     var parser = Parser{ .buf = trimSpaces(input) };
     if (std.mem.indexOfScalar(u8, input, '=')) |eqpos_| {
@@ -231,7 +350,7 @@ fn parsePipeline(comptime input: []const u8) Node.Pipeline {
             // @compileLog(next);
             if (next.len == 0) break;
             if (next[0] == '$') {
-                result.decls = result.decls ++ &[1][]const u8{next};
+                result.decls = result.decls ++ [1][]const u8{next};
             } else {
                 todo("declarations: '{s}'", .{input});
             }
@@ -247,7 +366,7 @@ fn parsePipeline(comptime input: []const u8) Node.Pipeline {
         // @compileLog(parser.pos);
         // @compileError(cmd_text);
         if (cmd_text.len == 0) break;
-        result.cmds = result.cmds ++ [1]Node.Command{parseCommand(cmd_text)};
+        result.cmds = result.cmds ++ [1]Node.Command{parseCommand2(cmd_text)};
         parser.pos += 1; // skip '|'
     }
     return result;
@@ -265,9 +384,9 @@ fn parseIf(comptime input: []const u8) Node {
     return .{ .if_ = .{ .pipeline = parsePipeline(input[2..]) } };
 }
 
-inline fn parseNodes(comptime fmt: []const u8) []const Node {
+inline fn parseNodes(comptime text: []const u8) []const Node {
     var nodes: []const Node = &[0]Node{};
-    var parser = Parser{ .buf = fmt };
+    var parser = Parser{ .buf = text };
     var trim_right = false;
     var trim_left = false;
     while (!parser.eos()) : (parser.pos += 1) {
@@ -341,46 +460,54 @@ inline fn parseNodes(comptime fmt: []const u8) []const Node {
 }
 /// recursively appends children of range/ifs to their lists
 /// until end action reached
-fn parseTree(comptime flat_nodes: []const Node, comptime stop_types: []const NodeType) Node.List {
-    var result: []const Node = &[0]Node{};
+// fn parseTree(lexer: *lex.Lexer, stop_types: []const lex.ItemType) Node.List {
+//     var result: []const Node = &[0]Node{};
 
-    var i: usize = 0;
-    while (i < flat_nodes.len) : (i += 1) {
-        var node = flat_nodes[i];
-        // append children until end
-        switch (node) {
-            .range => {
-                i += 1;
-                const list = parseTree(flat_nodes[i..], &[_]NodeType{.end});
-                node.range.list = list;
-                if (list.len > 0)
-                    i += list.len;
-                // TODO: support range else list
-            },
-            .if_ => {
-                {
-                    i += 1;
-                    const list = parseTree(flat_nodes[i..], &[_]NodeType{ .end, .else_ });
-                    node.if_.list = list;
-                    if (list.len > 0)
-                        i += list.len;
-                }
-                if (i < flat_nodes.len and flat_nodes[i] == .else_) {
-                    i += 1;
-                    const list = parseTree(flat_nodes[i..], &[_]NodeType{.end});
-                    node.if_.else_list = list;
-                    if (list.len > 0)
-                        i += list.len;
-                }
-            },
-            else => {
-                if (std.mem.indexOfScalar(NodeType, stop_types, node)) |_| break;
-            },
-        }
-        result = result ++ &[1]Node{node};
-    }
-    return .{ .len = i, .root = result };
-}
+//     var i: usize = 0;
+//     // while (i < flat_nodes.len) : (i += 1) {
+//     while (lexer.nextItem()) |item| {
+//         //     // var node = flat_nodes[i];
+//         //     // append children until end
+//         switch (item.typ) {
+//             .text => result = result ++ [1]Node{.{ .text = item.val }},
+//             .left_delim => result = result ++ [1]Node{.{ .action = parseTree() }},,
+//             .EOF => break,
+//             else => todo("support more types {}", .{item}),
+//         }
+//         i += 1;
+//         //     switch (node) {
+//         //         .range => {
+//         //             i += 1;
+//         //             const list = parseTree(flat_nodes[i..], &[_]NodeType{.end});
+//         //             node.range.list = list;
+//         //             if (list.len > 0)
+//         //                 i += list.len;
+//         //             // TODO: support range else list
+//         //         },
+//         //         .if_ => {
+//         //             {
+//         //                 i += 1;
+//         //                 const list = parseTree(flat_nodes[i..], &[_]NodeType{ .end, .else_ });
+//         //                 node.if_.list = list;
+//         //                 if (list.len > 0)
+//         //                     i += list.len;
+//         //             }
+//         //             if (i < flat_nodes.len and flat_nodes[i] == .else_) {
+//         //                 i += 1;
+//         //                 const list = parseTree(flat_nodes[i..], &[_]NodeType{.end});
+//         //                 node.if_.else_list = list;
+//         //                 if (list.len > 0)
+//         //                     i += list.len;
+//         //             }
+//         //         },
+//         //         else => {
+//         //             if (std.mem.indexOfScalar(NodeType, stop_types, node)) |_| break;
+//         //         },
+//         //     }
+//         //     result = result ++ &[1]Node{node};
+//     }
+//     return .{ .len = i, .root = result };
+// }
 
 // fn visitNodes(nodes: []const Node, ctx: anytype, cb: fn (Node, @TypeOf(ctx)) void) void {
 //     for (nodes) |node| {
@@ -393,25 +520,21 @@ fn parseTree(comptime flat_nodes: []const Node, comptime stop_types: []const Nod
 //         }
 //     }
 // }
-
-const Options = struct {
-    eval_branch_quota: usize = 2000,
-    name: ?[]const u8 = null,
-};
-pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
-    @setEvalBranchQuota(options_.eval_branch_quota);
-    var flat_nodes = parseNodes(fmt);
-    // flat_nodes is a flat list of nodes here.
-    // need to nest range nodes in range / if.
-    var tree_ = parseTree(flat_nodes, &[_]NodeType{});
-    var root = tree_.root;
-    // append remaining non-nested nodes
-    if (tree_.len < flat_nodes.len) {
-        for (flat_nodes[tree_.len..]) |node|
-            root = root ++ [1]Node{node};
-        tree_.len = flat_nodes.len;
-    }
-    tree_.root = root;
+pub fn Template(comptime text: []const u8, comptime options_: Options) type {
+    // @setEvalBranchQuota(options_.eval_branch_quota);
+    // var flat_nodes = parseNodes(text);
+    // // flat_nodes is a flat list of nodes here.
+    // // need to nest range nodes in range / if.
+    // var tree_ = parseTree(flat_nodes, &[_]NodeType{});
+    // var root = tree_.root;
+    // // append remaining non-nested nodes
+    // if (tree_.len < flat_nodes.len) {
+    //     for (flat_nodes[tree_.len..]) |node|
+    //         root = root ++ [1]Node{node};
+    //     tree_.len = flat_nodes.len;
+    // }
+    // tree_.root = root;
+    const tree_ = parseTemplate(text, options_);
 
     return struct {
         pub const options = options_;
@@ -437,11 +560,11 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
                 switch (cmd) {
                     .field => if (@hasField(types[i], cmd.field) or @hasDecl(types[i], cmd.field)) {
                         types = types ++ [_]type{@TypeOf(@field(dummy, cmd.field))};
-                    } else comptime showError("type {} has no field or public decl '{s}'", .{ types[i], cmd.field }),
+                    } else comptime t.compileError("type {} has no field or public decl '{s}'", .{ types[i], cmd.field }),
                     .func => if (@hasField(types[i], cmd.func[0]) or @hasDecl(types[i], cmd.func[0])) {
                         const T = @TypeOf(@field(dummy, cmd.func[0]));
                         types = types ++ [_]type{T};
-                    } else comptime showError("type {} has no public decl '{s}'", .{ types[i], cmd.func[0] }),
+                    } else comptime t.compileError("type {} has no public decl '{s}'", .{ types[i], cmd.func[0] }),
                     else => todo("support {s} command type", .{std.meta.tagName(cmd)}),
                 }
             }
@@ -548,7 +671,7 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
                                             args,
                                         );
                                     }
-                                } else showError("unsupported range command", .{});
+                                } else compileError("unsupported range command", .{});
                             } else {
                                 std.debug.assert(pipeline.cmds.len == 1);
                                 if (pipeline.cmds[0] == .interval) {
@@ -579,7 +702,7 @@ pub fn Template(comptime fmt: []const u8, comptime options_: Options) type {
                                             args,
                                         );
                                     }
-                                } else comptime showError("unsupported range command {}", .{pipeline.cmds[0]});
+                                } else comptime compileError("unsupported range command {}", .{pipeline.cmds[0]});
                             }
                         }
                     },
@@ -656,15 +779,15 @@ fn StrHasher(comptime min_bytes: usize) type {
     };
 }
 
-inline fn memeql(a: []const u8, comptime b: []const u8) bool {
+pub inline fn memeql(a: []const u8, comptime b: []const u8) bool {
     // const Sh = StrHasher(b.len);
     // return (comptime Sh.case(b)) == Sh.match(a) catch return false;
     return mem.eql(u8, a, b);
 }
 
-test "main tests" {
-    _ = @import("tests.zig");
-}
+// test "main tests" {
+//     _ = @import("tests.zig");
+// }
 
 test "string match" {
     const E = enum {
