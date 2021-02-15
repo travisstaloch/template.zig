@@ -127,9 +127,7 @@ pub fn Lexer(comptime options: Options) type {
             return l;
         }
 
-        pub fn debug(comptime msg: []const u8, args: anytype) void {
-            options.debug(msg, args);
-        }
+        pub const debug = options.debug;
 
         // next returns the next rune in the input.
         fn next(l: *Lex) rune {
@@ -160,7 +158,6 @@ pub fn Lexer(comptime options: Options) type {
 
         // emit passes an item back to the client.
         fn emit(l: *Lex, t: ItemType) void {
-            // l.items <- item{t, l.start, l.input.bytes[l.start:l.input.i], l.startLine}
             debug("emit {s}", .{@tagName(t)});
             l.items.tryWrite(Item.init(
                 t,
@@ -170,7 +167,6 @@ pub fn Lexer(comptime options: Options) type {
             )) catch |e| {
                 _ = l.errorf("emit error {}", .{@errorName(e)});
             };
-            // l.items.update(1);
 
             l.start = l.input.i;
             l.startLine = l.line;

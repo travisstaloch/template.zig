@@ -1,5 +1,5 @@
 const std = @import("std");
-usingnamespace @import("template.zig");
+usingnamespace @import("Node.zig");
 const lex = @import("lex.zig");
 const Options = @import("Options.zig");
 
@@ -191,9 +191,7 @@ pub fn TreeOpts(comptime options: Options) type {
             }
         }
 
-        pub fn debug(comptime msg: []const u8, args: anytype) void {
-            options.debug(msg, args);
-        }
+        pub const debug = options.debug;
 
         // func | variable | field | constant | interval
         fn command(t: *Tree) Node.Command {
@@ -222,7 +220,7 @@ pub fn TreeOpts(comptime options: Options) type {
         }
 
         pub fn parseAlloc(
-            comptime text: []const u8,
+            text: []const u8,
             name: []const u8,
             left_delim: []const u8,
             comptime right_delim: []const u8,
@@ -368,7 +366,7 @@ pub fn TreeOpts(comptime options: Options) type {
 
                 var chain = Node{ .chain = .{ .node = chain_node, .field = &[0][]const u8{} } };
                 if (options.is_comptime) {
-                    inline while (t.peek().typ == .field)
+                    while (t.peek().typ == .field)
                         t.push([]const u8, &chain.chain.field, t.next().val[1..]); // skip leading '.'
                 } else {
                     while (t.peek().typ == .field) {

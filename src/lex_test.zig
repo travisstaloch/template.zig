@@ -2,7 +2,7 @@ const std = @import("std");
 const t = std.testing;
 usingnamespace @import("lex.zig");
 usingnamespace @import("util.zig");
-
+const Options = @import("Options.zig");
 // Make the types prettyprint.
 const itemName = std.ComptimeStringMap(ItemType, .{
     .{ .err, "error" },
@@ -557,7 +557,8 @@ const lexTests = [_]lexTest{
 // collect gathers the emitted items into a slice.
 fn collect(lt: lexTest, left: string, comptime right: string) ![]const Item {
     var items_buf: [0x10]Item = undefined;
-    var l = Lexer.init(lt.name, lt.input, left, right, &items_buf);
+    const options = Options{};
+    var l = Lexer(options).init(lt.name, lt.input, left, right, &items_buf);
     var items = std.ArrayList(Item).init(t.allocator);
 
     while (l.nextItem()) |itm| {

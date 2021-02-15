@@ -1,12 +1,14 @@
 const std = @import("std");
 
-eval_branch_quota: u32 = 2000,
+eval_branch_quota: u32 = 4000,
 is_comptime: bool = true,
 compile_log: bool = false,
 name: ?[]const u8 = null,
 context: []const u8 = "",
 
-pub fn debug(comptime options: @This(), comptime fmt: []const u8, args: anytype) void {
+const Options = @This();
+
+pub fn debug(comptime options: Options, comptime fmt: []const u8, args: anytype) void {
     if (options.is_comptime and options.compile_log) {
         // @compileLog(options.context, fmt, args);
         @compileLog(fmt, args);
@@ -17,12 +19,11 @@ pub fn debug(comptime options: @This(), comptime fmt: []const u8, args: anytype)
     }
 }
 
-pub fn withName(comptime options: @This(), comptime name: []const u8) @This() {
-    return .{
-        .eval_branch_quota = options.eval_branch_quota,
-        .is_comptime = options.is_comptime,
-        .compile_log = options.compile_log,
-        .context = options.context,
-        .name = name,
-    };
+pub fn with(comptime options: Options, comptime new_options: anytype) Options {
+    var result = options;
+    inline for (std.meta.fields(@TypeOf(new_options))) |f| {
+        if (!@hasField(Options, f.name)) @compileError("Options has no field '" ++ f.name ++ "'");
+        @field(result, f.name) = @field(new_options, f.name);
+    }
+    return result;
 }

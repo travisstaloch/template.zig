@@ -192,6 +192,7 @@ const parse_tests = [_]ParseTest{
 };
 
 const t = std.testing;
+const options = Options{ .is_comptime = false, .compile_log = false };
 
 test "parse" {
     // t.log_level = .debug;
@@ -205,16 +206,12 @@ test "parse" {
             // @compileLog(pt.name, pt.input);
             var gpa = std.heap.GeneralPurposeAllocator(.{}){};
             var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
-            const options = Options{
-                .eval_branch_quota = 64000,
-                .is_comptime = true,
-                .compile_log = false,
-            };
+            const local_options = comptime options.with(.{ .eval_branch_quota = 64000 });
 
-            var tree = if (options.is_comptime)
-                comptime Tree(options).parse(pt.input, pt.name, "", "", {}, {})
+            var tree = if (local_options.is_comptime)
+                comptime Tree(local_options).parse(pt.input, pt.name, "", "", {}, {})
             else
-                Tree(options).parseAlloc(pt.input, pt.name, "", "", {}, {}, &arena.allocator);
+                Tree(local_options).parseAlloc(pt.input, pt.name, "", "", {}, {}, &arena.allocator);
             defer arena.deinit();
 
             var buf = [1]u8{0} ** 0x1000;
@@ -223,7 +220,7 @@ test "parse" {
 
             // std.debug.print("printed {s}\n", .{std.mem.spanZ(&buf)});
             const written = fbs.getWritten();
-            if (true or !std.mem.eql(u8, written, pt.result))
+            if (!std.mem.eql(u8, pt.result, written)) {
                 std.debug.print(
                     \\---{}:{s}---
                     \\title:     {s}
@@ -242,22 +239,21 @@ test "parse" {
                     fbs.getWritten(),
                     pt.result,
                 });
-            // t.expectEqualStrings(pt.input, written);
-            // if (tree.root.len > 0 and tree.root[0] == .action) std.debug.print("tree.root.len {}\n", .{tree.root.len});
+                t.expectEqualStrings(pt.result, written);
+            }
         }
     }
 }
 
-fn parseText(comptime options: Options, comptime text: []const u8, allocator: *std.mem.Allocator) Tree(options) {
-    return if (options.is_comptime)
-        Tree(options).parse(text, "", "", "", {}, {})
+fn parseText(comptime opts: Options, comptime text: []const u8, allocator: *std.mem.Allocator) Tree(opts) {
+    return if (opts.is_comptime)
+        Tree(opts).parse(text, "", "", "", {}, {})
     else
-        Tree(options).parseAlloc(text, "", "", "", {}, {}, allocator);
+        Tree(opts).parseAlloc(text, "", "", "", {}, {}, allocator);
 }
 
 test "chain" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
-    const options = Options{ .is_comptime = false, .compile_log = false };
     // t.log_level = .debug;
     const tree = parseText(options, "{{(.Y .Z).Field}}", &arena.allocator);
 
@@ -283,7 +279,6 @@ test "range fields" {
     // t.log_level = .debug;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    const options = Options{ .is_comptime = false, .compile_log = false };
     const tree = parseText(options, "{{range .X.Y.Z}}hello{{end}}", &arena.allocator);
     t.expectEqual(tree.root.root.len, 1);
     t.expect(tree.root.root[0] == .range);
@@ -296,7 +291,7 @@ test "range fields" {
 test "nested pipeline" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    const options = Options{ .is_comptime = false, .compile_log = false };
+
     // const tree = parseText(options, "{{.X (.Y .Z) (.A | .B .C) (.E)}}", &arena.allocator);
     const tree = parseText(options, parse_tests[13].input, &arena.allocator);
     t.expectEqual(tree.root.root.len, 1);
@@ -307,5 +302,4 @@ test "nested pipeline" {
     t.expect(tree.root.root[0].action.cmds[0].args[1] == .pipeline);
     t.expect(tree.root.root[0].action.cmds[0].args[2] == .pipeline);
     t.expect(tree.root.root[0].action.cmds[0].args[3] == .pipeline);
-    std.debug.print("\n{s}\n", .{@tagName(tree.root.root[0])});
 }
