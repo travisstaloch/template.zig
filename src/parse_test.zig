@@ -216,7 +216,7 @@ test "parse" {
 
             var buf = [1]u8{0} ** 0x1000;
             var fbs = std.io.fixedBufferStream(&buf);
-            for (tree.root.root) |node| try fbs.writer().print("{}", .{node});
+            for (tree.root.list.root) |node| try fbs.writer().print("{}", .{node});
 
             // std.debug.print("printed {s}\n", .{std.mem.spanZ(&buf)});
             const written = fbs.getWritten();
@@ -232,7 +232,7 @@ test "parse" {
                     \\
                 , .{
                     i,
-                    if (tree.root.root.len > 0) @tagName(tree.root.root[0]) else "",
+                    if (tree.root.list.root.len > 0) @tagName(tree.root.list.root[0]) else "",
                     pt.name,
                     pt.ok,
                     pt.input,
@@ -257,21 +257,21 @@ test "chain" {
     // t.log_level = .debug;
     const tree = parseText(options, "{{(.Y .Z).Field}}", &arena.allocator);
 
-    t.expectEqual(tree.root.root.len, 1);
-    t.expect(tree.root.root[0] == .action);
-    t.expectEqual(tree.root.root[0].action.cmds.len, 1);
-    t.expectEqual(tree.root.root[0].action.cmds[0].args.len, 1);
-    t.expect(tree.root.root[0].action.cmds[0].args[0] == .chain);
-    t.expect(tree.root.root[0].action.cmds[0].args[0].chain.node.* == .pipeline);
-    t.expectEqual(tree.root.root[0].action.cmds[0].args[0].chain.node.*.pipeline.cmds.len, 1);
-    t.expectEqual(tree.root.root[0].action.cmds[0].args[0].chain.node.*.pipeline.cmds[0].args.len, 2);
-    t.expect(tree.root.root[0].action.cmds[0].args[0].chain.node.*.pipeline.cmds[0].args[0] == .field);
-    t.expectEqualStrings("Y", tree.root.root[0].action.cmds[0].args[0].chain.node.*.pipeline.cmds[0].args[0].field[0]);
-    t.expect(tree.root.root[0].action.cmds[0].args[0].chain.node.*.pipeline.cmds[0].args[1] == .field);
-    t.expectEqualStrings("Z", tree.root.root[0].action.cmds[0].args[0].chain.node.*.pipeline.cmds[0].args[1].field[0]);
-    t.expectEqual(tree.root.root[0].action.cmds[0].args[0].chain.node.*.pipeline.decls.len, 0);
-    t.expectEqual(tree.root.root[0].action.cmds[0].args[0].chain.field.len, 1);
-    t.expectEqualStrings("Field", tree.root.root[0].action.cmds[0].args[0].chain.field[0]);
+    t.expectEqual(tree.root.list.root.len, 1);
+    t.expect(tree.root.list.root[0] == .action);
+    t.expectEqual(tree.root.list.root[0].action.cmds.len, 1);
+    t.expectEqual(tree.root.list.root[0].action.cmds[0].args.len, 1);
+    t.expect(tree.root.list.root[0].action.cmds[0].args[0] == .chain);
+    t.expect(tree.root.list.root[0].action.cmds[0].args[0].chain.node.* == .pipeline);
+    t.expectEqual(tree.root.list.root[0].action.cmds[0].args[0].chain.node.*.pipeline.cmds.len, 1);
+    t.expectEqual(tree.root.list.root[0].action.cmds[0].args[0].chain.node.*.pipeline.cmds[0].args.len, 2);
+    t.expect(tree.root.list.root[0].action.cmds[0].args[0].chain.node.*.pipeline.cmds[0].args[0] == .field);
+    t.expectEqualStrings("Y", tree.root.list.root[0].action.cmds[0].args[0].chain.node.*.pipeline.cmds[0].args[0].field[0]);
+    t.expect(tree.root.list.root[0].action.cmds[0].args[0].chain.node.*.pipeline.cmds[0].args[1] == .field);
+    t.expectEqualStrings("Z", tree.root.list.root[0].action.cmds[0].args[0].chain.node.*.pipeline.cmds[0].args[1].field[0]);
+    t.expectEqual(tree.root.list.root[0].action.cmds[0].args[0].chain.node.*.pipeline.decls.len, 0);
+    t.expectEqual(tree.root.list.root[0].action.cmds[0].args[0].chain.field.len, 1);
+    t.expectEqualStrings("Field", tree.root.list.root[0].action.cmds[0].args[0].chain.field[0]);
     defer arena.deinit();
 }
 
@@ -280,12 +280,12 @@ test "range fields" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const tree = parseText(options, "{{range .X.Y.Z}}hello{{end}}", &arena.allocator);
-    t.expectEqual(tree.root.root.len, 1);
-    t.expect(tree.root.root[0] == .range);
-    t.expectEqual(tree.root.root[0].range.pipeline.?.cmds.len, 1);
-    t.expectEqual(tree.root.root[0].range.pipeline.?.cmds[0].args.len, 1);
-    t.expect(tree.root.root[0].range.pipeline.?.cmds[0].args[0] == .field);
-    t.expectEqual(tree.root.root[0].range.pipeline.?.cmds[0].args[0].field.len, 3);
+    t.expectEqual(tree.root.list.root.len, 1);
+    t.expect(tree.root.list.root[0] == .range);
+    t.expectEqual(tree.root.list.root[0].range.pipeline.?.cmds.len, 1);
+    t.expectEqual(tree.root.list.root[0].range.pipeline.?.cmds[0].args.len, 1);
+    t.expect(tree.root.list.root[0].range.pipeline.?.cmds[0].args[0] == .field);
+    t.expectEqual(tree.root.list.root[0].range.pipeline.?.cmds[0].args[0].field.len, 3);
 }
 
 test "nested pipeline" {
@@ -294,12 +294,12 @@ test "nested pipeline" {
 
     // const tree = parseText(options, "{{.X (.Y .Z) (.A | .B .C) (.E)}}", &arena.allocator);
     const tree = parseText(options, parse_tests[13].input, &arena.allocator);
-    t.expectEqual(tree.root.root.len, 1);
-    t.expect(tree.root.root[0] == .action);
-    t.expectEqual(tree.root.root[0].action.cmds.len, 1);
-    t.expectEqual(tree.root.root[0].action.cmds[0].args.len, 4);
-    t.expect(tree.root.root[0].action.cmds[0].args[0] == .field);
-    t.expect(tree.root.root[0].action.cmds[0].args[1] == .pipeline);
-    t.expect(tree.root.root[0].action.cmds[0].args[2] == .pipeline);
-    t.expect(tree.root.root[0].action.cmds[0].args[3] == .pipeline);
+    t.expectEqual(tree.root.list.root.len, 1);
+    t.expect(tree.root.list.root[0] == .action);
+    t.expectEqual(tree.root.list.root[0].action.cmds.len, 1);
+    t.expectEqual(tree.root.list.root[0].action.cmds[0].args.len, 4);
+    t.expect(tree.root.list.root[0].action.cmds[0].args[0] == .field);
+    t.expect(tree.root.list.root[0].action.cmds[0].args[1] == .pipeline);
+    t.expect(tree.root.list.root[0].action.cmds[0].args[2] == .pipeline);
+    t.expect(tree.root.list.root[0].action.cmds[0].args[3] == .pipeline);
 }

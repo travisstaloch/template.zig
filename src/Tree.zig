@@ -12,7 +12,7 @@ pub fn TreeOpts(comptime options: Options) type {
 
         // name: []const u8, // name of the template represented by the tree.
         // parse_name: []const u8, // name of the top-level template during parsing, for error messages.
-        root: Node.List, // top-level root of the tree.
+        root: Node, // top-level root of the tree.
         // text: []const u8, // text parsed to create the template (or its parent)
         // Parsing :only,; cleared after parse.
         funcs: FuncMap,
@@ -26,7 +26,7 @@ pub fn TreeOpts(comptime options: Options) type {
         pub fn init(lexer: *Lexer, funcs: FuncMap, tree_set: TreeSet) Tree {
             comptime std.debug.assert(options.is_comptime);
             return .{
-                .root = Node.List.init(),
+                .root = .{ .list = Node.List.init() },
                 .lex = lexer,
                 .vars = &[1][]const u8{"$"},
                 .funcs = funcs,
@@ -38,7 +38,7 @@ pub fn TreeOpts(comptime options: Options) type {
         pub fn initAlloc(lexer: *Lexer, funcs: FuncMap, tree_set: TreeSet, allocator: *std.mem.Allocator) Tree {
             comptime std.debug.assert(!options.is_comptime);
             return .{
-                .root = Node.List.init(),
+                .root = .{ .list = Node.List.init() },
                 .lex = lexer,
                 .vars = &[1][]const u8{"$"},
                 .funcs = funcs,
@@ -255,7 +255,7 @@ pub fn TreeOpts(comptime options: Options) type {
         fn parseImpl(t: *Tree) Tree {
             debug("\n----\nparse input '{s}'", .{t.lex.input.bytes});
 
-            var list = &t.root;
+            var list = &t.root.list;
             while (t.peek().typ != .EOF) {
                 // debug("parse item {}", .{item});
                 if (t.peek().typ == .left_delim) {
@@ -498,33 +498,36 @@ pub fn TreeOpts(comptime options: Options) type {
             }
         }
 
+        inline fn pipelineCmds(t: *Tree, pipe: *Node.Pipeline, context: NodeType) void {
+            const token = t.nextNonSpace();
+            debug("pipeline token {}", .{token});
+            switch (token.typ) {
+                .right_delim, .right_paren => {
+                    // At this point, the pipeline is complete
+                    // t.checkPipeline(pipe, context) // TODO
+                    if (token.typ == .right_paren) {
+                        t.backup();
+                    }
+                    return;
+                },
+                .bool, .char_constant, .complex, .dot, .field, .identifier, .number, //
+                .nil, .raw_string, .string, .variable, .left_paren => {
+                    t.backup();
+                    t.push(Node.Command, &pipe.cmds, t.command());
+                },
+                else => t.unexpected(token, context),
+            }
+            pipelineCmds(t, pipe, context);
+        }
+
         // Pipeline:
         //	declarations? command ('|' command)*
         fn pipeline(t: *Tree, context: NodeType) Node.Pipeline {
-            // const token = t.peekNonSpace();
             // debug("pipeline context {s}, token {}", .{ @tagName(context), token });
             var pipe = Node.Pipeline.init();
             pipelineDecls(t, &pipe, context);
-            while (true) {
-                const token2 = t.nextNonSpace();
-                debug("pipeline token2 {}", .{token2});
-                switch (token2.typ) {
-                    .right_delim, .right_paren => {
-                        // At this point, the pipeline is complete
-                        // t.checkPipeline(pipe, context) // TODO
-                        if (token2.typ == .right_paren) {
-                            t.backup();
-                        }
-                        return pipe;
-                    },
-                    .bool, .char_constant, .complex, .dot, .field, .identifier, .number, //
-                    .nil, .raw_string, .string, .variable, .left_paren => {
-                        t.backup();
-                        t.push(Node.Command, &pipe.cmds, t.command());
-                    },
-                    else => t.unexpected(token2, context),
-                }
-            }
+            pipelineCmds(t, &pipe, context);
+            // @call(.{ .modifier = .always_tail }, pipelineCmds, .{ t, &pipe, context });
             return pipe;
         }
 
